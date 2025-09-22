@@ -5,7 +5,7 @@ from .models import (
     User, Role, PermissionModel,
     UserCreate, UserUpdate, UserResponse, UserLogin, Token,
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
-    UserStatus, Permission
+    UserStatus, Permission, configure_base
 )
 
 # Authentication
@@ -202,7 +202,7 @@ __all__ = [
     "User", "Role", "PermissionModel",
     "UserCreate", "UserUpdate", "UserResponse", "UserLogin", "Token",
     "RoleCreate", "RoleResponse", "PermissionCreate", "PermissionResponse",
-    "UserStatus", "Permission",
+    "UserStatus", "Permission", "configure_base",
 
     # Authentication
     "AuthConfig", "AuthManager", "PasswordManager", "JWTManager",

@@ -6,7 +6,18 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Foreign
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
+# Default Base - can be overridden by configure_base()
 Base = declarative_base()
+
+def configure_base(custom_base=None):
+    """Configure the SQLAlchemy Base class for the users package.
+
+    Args:
+        custom_base: Custom SQLAlchemy declarative base. If None, uses default.
+    """
+    global Base
+    if custom_base is not None:
+        Base = custom_base
 
 class UserStatus(str, Enum):
     ACTIVE = "active"
@@ -51,7 +62,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
-    metadata = Column(Text, nullable=True)  # JSON field for additional data
+    user_metadata = Column(Text, nullable=True)  # JSON field for additional data
 
     roles = relationship("Role", secondary=user_roles, back_populates="users")
 

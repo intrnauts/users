@@ -2,7 +2,11 @@ from typing import Optional, AsyncGenerator
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker, Session
-from .models import Base
+
+def get_base():
+    """Get the configured Base class"""
+    from .models import Base
+    return Base
 
 class DatabaseConfig:
     def __init__(
@@ -42,10 +46,12 @@ class SyncDatabaseManager:
 
     def create_tables(self):
         """Create all tables"""
+        Base = get_base()
         Base.metadata.create_all(bind=self.engine)
 
     def drop_tables(self):
         """Drop all tables"""
+        Base = get_base()
         Base.metadata.drop_all(bind=self.engine)
 
     def get_session(self) -> Session:
@@ -88,11 +94,13 @@ class AsyncDatabaseManager:
 
     async def create_tables(self):
         """Create all tables"""
+        Base = get_base()
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
     async def drop_tables(self):
         """Drop all tables"""
+        Base = get_base()
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
 

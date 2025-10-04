@@ -32,7 +32,7 @@ db_dependency = DatabaseDependency()
 
 def get_db() -> Session:
     """FastAPI dependency for database session"""
-    return db_dependency.get_db()
+    yield from db_dependency.get_db()
 
 def get_user_service(db: Session = Depends(get_db)) -> UserService:
     """FastAPI dependency for user service"""

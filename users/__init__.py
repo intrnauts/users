@@ -135,6 +135,9 @@ async def setup_users_package_async(
     db_config = DatabaseConfig(database_url, **database_kwargs)
     db_manager = configure_async_database(db_config)
 
+    # Configure database dependency
+    db_dependency.set_session_factory(db_manager.get_session)
+
     # Create tables if requested
     if create_tables:
         await db_manager.create_tables()

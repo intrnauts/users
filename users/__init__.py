@@ -2,10 +2,11 @@ __version__ = "0.1.0"
 
 # Core models and schemas
 from .models import (
-    User, Role, PermissionModel,
+    User, Role, PermissionModel, PasswordResetToken,
     UserCreate, UserUpdate, UserResponse, UserLogin, Token,
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
-    UserStatus, Permission, configure_base
+    UserStatus, Permission, configure_base,
+    PasswordResetRequest, PasswordResetConfirm, PasswordChange
 )
 
 # Authentication
@@ -44,6 +45,12 @@ from .routes import (
     create_user_router, create_role_router, create_permission_router
 )
 
+# Email service
+from .email_service import (
+    EmailService, EmailConfig,
+    configure_email_service, get_email_service
+)
+
 # MongoDB support (if available)
 try:
     from .database import (
@@ -62,6 +69,7 @@ def setup_users_package(
     algorithm: str = "HS256",
     access_token_expire_minutes: int = 30,
     create_tables: bool = True,
+    email_config: EmailConfig = None,
     **database_kwargs
 ):
     """
@@ -98,6 +106,10 @@ def setup_users_package(
     if create_tables:
         db_manager.create_tables()
 
+    # Configure email service if provided
+    if email_config:
+        configure_email_service(email_config)
+
     return auth_manager, db_manager
 
 async def setup_users_package_async(
@@ -106,6 +118,7 @@ async def setup_users_package_async(
     algorithm: str = "HS256",
     access_token_expire_minutes: int = 30,
     create_tables: bool = True,
+    email_config: EmailConfig = None,
     **database_kwargs
 ):
     """
@@ -141,6 +154,10 @@ async def setup_users_package_async(
     # Create tables if requested
     if create_tables:
         await db_manager.create_tables()
+
+    # Configure email service if provided
+    if email_config:
+        configure_email_service(email_config)
 
     return auth_manager, db_manager
 
@@ -202,10 +219,11 @@ def create_default_roles():
 # Export convenience functions
 __all__ = [
     # Core models
-    "User", "Role", "PermissionModel",
+    "User", "Role", "PermissionModel", "PasswordResetToken",
     "UserCreate", "UserUpdate", "UserResponse", "UserLogin", "Token",
     "RoleCreate", "RoleResponse", "PermissionCreate", "PermissionResponse",
     "UserStatus", "Permission", "configure_base",
+    "PasswordResetRequest", "PasswordResetConfirm", "PasswordChange",
 
     # Authentication
     "AuthConfig", "AuthManager", "PasswordManager", "JWTManager",
@@ -232,6 +250,10 @@ __all__ = [
 
     # Routes
     "create_user_router", "create_role_router", "create_permission_router",
+
+    # Email service
+    "EmailService", "EmailConfig",
+    "configure_email_service", "get_email_service",
 
     # Setup functions
     "setup_users_package", "setup_users_package_async",

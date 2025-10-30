@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+import secrets
 from fastapi import HTTPException, status
-from .models import User, UserCreate, UserUpdate, UserLogin, Token, UserResponse
+from .models import User, UserCreate, UserUpdate, UserLogin, Token, UserResponse, PasswordResetRequest, PasswordResetConfirm
 from .repository import UserRepositoryInterface, RoleRepository, PermissionRepository
 from .auth import get_auth_manager
+from .email_service import get_email_service
 
 class UserService:
     def __init__(
@@ -160,6 +162,116 @@ class UserService:
 
     async def get_user_permissions(self, user_id: int) -> List[str]:
         return await self.user_repo.get_user_permissions(user_id)
+
+    async def request_password_reset(
+        self,
+        request_data: PasswordResetRequest,
+        reset_url_template: str = None
+    ) -> bool:
+        """
+        Request a password reset for a user.
+
+        Args:
+            request_data: Password reset request with user email
+            reset_url_template: URL template for reset link (e.g., "https://app.com/reset?token={token}")
+
+        Returns:
+            Always returns True to prevent email enumeration
+        """
+        # Look up user by email
+        user = await self.user_repo.get_user_by_email(request_data.email)
+
+        # Always return True even if user doesn't exist (prevent email enumeration)
+        if not user:
+            return True
+
+        # Generate secure random token
+        reset_token = secrets.token_urlsafe(32)
+
+        # Token expires in 1 hour
+        expires_at = datetime.utcnow() + timedelta(hours=1)
+
+        # Delete any existing reset tokens for this user
+        await self.user_repo.delete_user_reset_tokens(user.id)
+
+        # Store token in database
+        await self.user_repo.create_password_reset_token(
+            user_id=user.id,
+            token=reset_token,
+            expires_at=expires_at
+        )
+
+        # Send reset email
+        try:
+            email_service = get_email_service()
+            await email_service.send_password_reset_email(
+                recipient_email=user.email,
+                reset_token=reset_token,
+                reset_url_template=reset_url_template
+            )
+        except Exception as e:
+            # Log error but don't expose it to prevent information leakage
+            import logging
+            logging.error(f"Failed to send password reset email: {e}")
+
+        return True
+
+    async def confirm_password_reset(self, confirm_data: PasswordResetConfirm) -> bool:
+        """
+        Confirm password reset with token and set new password.
+
+        Args:
+            confirm_data: Password reset confirmation with token and new password
+
+        Returns:
+            True if password was reset successfully
+
+        Raises:
+            HTTPException: If token is invalid, expired, or already used
+        """
+        # Get token from database
+        reset_token = await self.user_repo.get_password_reset_token(confirm_data.token)
+
+        if not reset_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset token"
+            )
+
+        # Check if token is already used
+        if reset_token.used:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset token has already been used"
+            )
+
+        # Check if token is expired
+        if datetime.utcnow() > reset_token.expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset token has expired"
+            )
+
+        # Get the user
+        user = await self.user_repo.get_user_by_id(reset_token.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        # Hash new password
+        auth_manager = get_auth_manager()
+        new_hashed_password = auth_manager.hash_password(confirm_data.new_password)
+
+        # Update user's password
+        user.hashed_password = new_hashed_password
+        self.user_repo.db.commit()
+
+        # Mark token as used
+        await self.user_repo.mark_token_as_used(confirm_data.token)
+
+        return True
 
     def _user_to_response(self, user: User) -> UserResponse:
         role_names = [role.name for role in user.roles] if user.roles else []

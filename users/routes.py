@@ -1,8 +1,9 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from .models import (
     UserCreate, UserUpdate, UserResponse, UserLogin, Token,
-    RoleCreate, RoleResponse, PermissionCreate, PermissionResponse
+    RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
+    PasswordResetRequest, PasswordResetConfirm, PasswordChange
 )
 from .service import UserService, RoleService, PermissionService
 from .dependencies import (
@@ -14,7 +15,8 @@ def create_user_router(
     prefix: str = "/users",
     tags: List[str] = None,
     include_auth: bool = True,
-    include_admin: bool = True
+    include_admin: bool = True,
+    password_reset_url_template: str = None
 ) -> APIRouter:
     """Create a FastAPI router with user management endpoints"""
 
@@ -55,14 +57,13 @@ def create_user_router(
 
         @router.post("/change-password")
         async def change_password(
-            current_password: str,
-            new_password: str,
+            password_data: PasswordChange,
             current_user = Depends(get_current_active_user),
             user_service: UserService = Depends(get_user_service)
         ):
-            """Change user password"""
+            """Change user password (requires current password)"""
             success = await user_service.change_password(
-                current_user.id, current_password, new_password
+                current_user.id, password_data.current_password, password_data.new_password
             )
             if not success:
                 raise HTTPException(
@@ -70,6 +71,28 @@ def create_user_router(
                     detail="Failed to change password"
                 )
             return {"message": "Password changed successfully"}
+
+        @router.post("/password-reset/request")
+        async def request_password_reset(
+            request_data: PasswordResetRequest,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Request a password reset (sends email with reset token)"""
+            await user_service.request_password_reset(
+                request_data,
+                reset_url_template=password_reset_url_template
+            )
+            # Always return success to prevent email enumeration
+            return {"message": "If the email exists, a password reset link has been sent"}
+
+        @router.post("/password-reset/confirm")
+        async def confirm_password_reset(
+            confirm_data: PasswordResetConfirm,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Confirm password reset with token and new password"""
+            await user_service.confirm_password_reset(confirm_data)
+            return {"message": "Password has been reset successfully"}
 
     if include_admin:
         @router.get("/", response_model=List[UserResponse])

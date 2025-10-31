@@ -1,19 +1,31 @@
 from typing import Optional
 import logging
 from dataclasses import dataclass
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class EmailConfig:
     """Configuration for email service"""
-    aws_region: str = "us-east-1"
+    provider: str = "ses"  # 'ses' or 'smtp'
     sender_email: str = None
     sender_name: str = "User Management"
     enabled: bool = True
 
+    # AWS SES settings
+    aws_region: str = "us-east-1"
+
+    # SMTP settings (for Gmail, etc.)
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 465  # SSL port
+    smtp_username: str = None  # Usually same as sender_email
+    smtp_password: str = None  # Gmail App Password
+
 class EmailService:
-    """Email service using AWS SES"""
+    """Email service supporting AWS SES and SMTP (Gmail, etc.)"""
 
     def __init__(self, config: EmailConfig):
         self.config = config
@@ -27,14 +39,79 @@ class EmailService:
             logger.warning("Sender email not configured - email service will not work")
             return
 
+        # Initialize based on provider
+        if config.provider == "ses":
+            try:
+                import boto3
+                self._ses_client = boto3.client('ses', region_name=config.aws_region)
+                logger.info(f"Email service initialized with SES in region {config.aws_region}")
+            except ImportError:
+                logger.error("boto3 not installed - email service will not work")
+            except Exception as e:
+                logger.error(f"Failed to initialize SES client: {e}")
+
+        elif config.provider == "smtp":
+            if not config.smtp_username or not config.smtp_password:
+                logger.warning("SMTP username/password not configured - email service will not work")
+            else:
+                logger.info(f"Email service initialized with SMTP ({config.smtp_host}:{config.smtp_port})")
+
+    def _send_via_smtp(self, recipient_email: str, subject: str, body_text: str, body_html: str) -> bool:
+        """Send email via SMTP (Gmail, etc.)"""
         try:
-            import boto3
-            self._ses_client = boto3.client('ses', region_name=config.aws_region)
-            logger.info(f"Email service initialized with SES in region {config.aws_region}")
-        except ImportError:
-            logger.error("boto3 not installed - email service will not work")
+            # Create message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = f"{self.config.sender_name} <{self.config.sender_email}>"
+            msg['To'] = recipient_email
+
+            # Attach both plain text and HTML versions
+            part1 = MIMEText(body_text, 'plain')
+            part2 = MIMEText(body_html, 'html')
+            msg.attach(part1)
+            msg.attach(part2)
+
+            # Send via SMTP
+            with smtplib.SMTP_SSL(self.config.smtp_host, self.config.smtp_port) as server:
+                server.login(self.config.smtp_username, self.config.smtp_password)
+                server.send_message(msg)
+
+            logger.info(f"Email sent via SMTP to {recipient_email}")
+            return True
         except Exception as e:
-            logger.error(f"Failed to initialize SES client: {e}")
+            logger.error(f"Failed to send email via SMTP to {recipient_email}: {e}")
+            return False
+
+    def _send_via_ses(self, recipient_email: str, subject: str, body_text: str, body_html: str) -> bool:
+        """Send email via AWS SES"""
+        try:
+            response = self._ses_client.send_email(
+                Source=f"{self.config.sender_name} <{self.config.sender_email}>",
+                Destination={
+                    'ToAddresses': [recipient_email]
+                },
+                Message={
+                    'Subject': {
+                        'Data': subject,
+                        'Charset': 'UTF-8'
+                    },
+                    'Body': {
+                        'Text': {
+                            'Data': body_text,
+                            'Charset': 'UTF-8'
+                        },
+                        'Html': {
+                            'Data': body_html,
+                            'Charset': 'UTF-8'
+                        }
+                    }
+                }
+            )
+            logger.info(f"Email sent via SES to {recipient_email}. MessageId: {response['MessageId']}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send email via SES to {recipient_email}: {e}")
+            return False
 
     async def send_password_reset_email(
         self,
@@ -58,8 +135,12 @@ class EmailService:
             logger.info(f"Email service disabled - would send reset token to {recipient_email}: {reset_token}")
             return True
 
-        if not self._ses_client:
+        # Check if email service is properly configured
+        if self.config.provider == "ses" and not self._ses_client:
             logger.error("SES client not initialized")
+            return False
+        elif self.config.provider == "smtp" and (not self.config.smtp_username or not self.config.smtp_password):
+            logger.error("SMTP credentials not configured")
             return False
 
         # Construct reset URL or use token directly
@@ -105,33 +186,13 @@ Best regards,
 </html>
 """
 
-        try:
-            response = self._ses_client.send_email(
-                Source=f"{self.config.sender_name} <{self.config.sender_email}>",
-                Destination={
-                    'ToAddresses': [recipient_email]
-                },
-                Message={
-                    'Subject': {
-                        'Data': subject,
-                        'Charset': 'UTF-8'
-                    },
-                    'Body': {
-                        'Text': {
-                            'Data': body_text,
-                            'Charset': 'UTF-8'
-                        },
-                        'Html': {
-                            'Data': body_html,
-                            'Charset': 'UTF-8'
-                        }
-                    }
-                }
-            )
-            logger.info(f"Password reset email sent to {recipient_email}. MessageId: {response['MessageId']}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send password reset email to {recipient_email}: {e}")
+        # Send email based on provider
+        if self.config.provider == "ses":
+            return self._send_via_ses(recipient_email, subject, body_text, body_html)
+        elif self.config.provider == "smtp":
+            return self._send_via_smtp(recipient_email, subject, body_text, body_html)
+        else:
+            logger.error(f"Unknown email provider: {self.config.provider}")
             return False
 
     async def send_verification_email(
@@ -155,8 +216,12 @@ Best regards,
             logger.info(f"Email service disabled - would send verification token to {recipient_email}: {verification_token}")
             return True
 
-        if not self._ses_client:
+        # Check if email service is properly configured
+        if self.config.provider == "ses" and not self._ses_client:
             logger.error("SES client not initialized")
+            return False
+        elif self.config.provider == "smtp" and (not self.config.smtp_username or not self.config.smtp_password):
+            logger.error("SMTP credentials not configured")
             return False
 
         # Construct verification URL or use token directly
@@ -199,33 +264,13 @@ Best regards,
 </html>
 """
 
-        try:
-            response = self._ses_client.send_email(
-                Source=f"{self.config.sender_name} <{self.config.sender_email}>",
-                Destination={
-                    'ToAddresses': [recipient_email]
-                },
-                Message={
-                    'Subject': {
-                        'Data': subject,
-                        'Charset': 'UTF-8'
-                    },
-                    'Body': {
-                        'Text': {
-                            'Data': body_text,
-                            'Charset': 'UTF-8'
-                        },
-                        'Html': {
-                            'Data': body_html,
-                            'Charset': 'UTF-8'
-                        }
-                    }
-                }
-            )
-            logger.info(f"Verification email sent to {recipient_email}. MessageId: {response['MessageId']}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send verification email to {recipient_email}: {e}")
+        # Send email based on provider
+        if self.config.provider == "ses":
+            return self._send_via_ses(recipient_email, subject, body_text, body_html)
+        elif self.config.provider == "smtp":
+            return self._send_via_smtp(recipient_email, subject, body_text, body_html)
+        else:
+            logger.error(f"Unknown email provider: {self.config.provider}")
             return False
 
 # Global email service instance

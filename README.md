@@ -7,6 +7,8 @@ A flexible and robust user management package for FastAPI backends, providing au
 - 🔐 **JWT Authentication** - Secure token-based authentication
 - 👥 **User Management** - Complete CRUD operations for users
 - 🛡️ **Role-Based Access Control (RBAC)** - Flexible permission system
+- 📧 **Email Integration** - AWS SES support for password reset and verification
+- 🔑 **Password Reset** - Secure token-based password reset flow
 - 🔧 **Database Adapters** - Support for SQLAlchemy and MongoDB
 - 🚀 **FastAPI Integration** - Ready-to-use dependencies and routers
 - 🧪 **Comprehensive Testing** - Full test suite included
@@ -219,7 +221,9 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `POST /users/login` - Login and get access token
 - `GET /users/me` - Get current user info
 - `PUT /users/me` - Update current user
-- `POST /users/change-password` - Change password
+- `POST /users/change-password` - Change password (requires current password)
+- `POST /users/password-reset/request` - Request password reset (sends email)
+- `POST /users/password-reset/confirm` - Confirm password reset with token
 
 ### User Management (Admin)
 - `GET /users/` - List users
@@ -239,6 +243,143 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `POST /permissions/` - Create permission
 - `GET /permissions/` - List permissions
 - `DELETE /permissions/{permission_id}` - Delete permission
+
+## Email Integration & Password Reset
+
+The users package now includes built-in support for email notifications using AWS SES, with a focus on password reset functionality.
+
+### Setup Email Service
+
+```python
+from users import setup_users_package, EmailConfig
+
+# Configure email service with AWS SES
+email_config = EmailConfig(
+    aws_region="us-east-1",
+    sender_email="noreply@yourdomain.com",
+    sender_name="Your App Name",
+    enabled=True  # Set to False to disable email sending (for testing)
+)
+
+# Setup users package with email support
+auth_manager, db_manager = setup_users_package(
+    secret_key="your-secret-key",
+    database_url="sqlite:///./users.db",
+    email_config=email_config
+)
+```
+
+### Configure Password Reset URL
+
+When creating the user router, you can specify a URL template for password reset links:
+
+```python
+from users import create_user_router
+
+# The {token} placeholder will be replaced with the actual reset token
+user_router = create_user_router(
+    password_reset_url_template="https://yourapp.com/reset-password?token={token}"
+)
+
+app.include_router(user_router, prefix="/api/users")
+```
+
+### Password Reset Flow
+
+**1. User requests password reset:**
+
+```bash
+curl -X POST "http://localhost:8000/api/users/password-reset/request" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}'
+```
+
+Response:
+```json
+{
+  "message": "If the email exists, a password reset link has been sent"
+}
+```
+
+The user will receive an email with a reset link (valid for 1 hour).
+
+**2. User confirms password reset with token:**
+
+```bash
+curl -X POST "http://localhost:8000/api/users/password-reset/confirm" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "abc123...",
+    "new_password": "newSecurePassword123"
+  }'
+```
+
+Response:
+```json
+{
+  "message": "Password has been reset successfully"
+}
+```
+
+### Email Configuration (AWS SES)
+
+To use AWS SES for sending emails:
+
+1. **Verify your sender email address** in AWS SES Console
+2. **Configure AWS credentials** (one of the following):
+   - Environment variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+   - AWS CLI configuration (`~/.aws/credentials`)
+   - IAM role (for EC2/ECS deployments)
+
+3. **Required IAM permissions:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### Environment Variables
+
+```bash
+# Email Configuration
+EMAIL_ENABLED=True
+EMAIL_SENDER_EMAIL=noreply@yourdomain.com
+EMAIL_SENDER_NAME=Your App Name
+AWS_REGION=us-east-1
+
+# Password Reset
+PASSWORD_RESET_URL_TEMPLATE=https://yourapp.com/reset-password?token={token}
+```
+
+### Security Features
+
+- **Token expiration**: Reset tokens expire after 1 hour
+- **One-time use**: Tokens are marked as used after successful password reset
+- **Email enumeration prevention**: API always returns success, even if email doesn't exist
+- **Secure token generation**: Uses `secrets.token_urlsafe()` for cryptographically secure tokens
+- **Token invalidation**: All existing tokens are deleted when a new one is requested
+
+### Disable Email for Testing
+
+During development or testing, you can disable email sending:
+
+```python
+email_config = EmailConfig(
+    enabled=False  # Emails won't be sent, but tokens will be logged
+)
+```
+
+When disabled, the reset token will be logged to the console instead of sent via email.
 
 ## Models
 
@@ -331,6 +472,15 @@ MIT License - see LICENSE file for details.
 - Examples: Check the `examples/` directory
 
 ## Changelog
+
+### v0.2.0 (Latest)
+- 📧 Added email service integration with AWS SES
+- 🔑 Added password reset functionality
+- 📝 Added email verification support (coming soon)
+- 🔒 Enhanced security with token expiration and one-time use
+- 📚 Updated documentation with email integration examples
+- ✨ Added `PasswordResetRequest`, `PasswordResetConfirm`, and `PasswordChange` schemas
+- 🗃️ Added `PasswordResetToken` database model
 
 ### v0.1.0
 - Initial release

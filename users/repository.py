@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
+from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
-from .models import User, Role, PermissionModel, UserCreate, UserUpdate
+from .models import User, Role, PermissionModel, PasswordResetToken, UserCreate, UserUpdate
 
 class UserRepositoryInterface(ABC):
     @abstractmethod
@@ -35,6 +36,22 @@ class UserRepositoryInterface(ABC):
 
     @abstractmethod
     async def get_user_permissions(self, user_id: int) -> List[str]:
+        pass
+
+    @abstractmethod
+    async def create_password_reset_token(self, user_id: int, token: str, expires_at: datetime) -> PasswordResetToken:
+        pass
+
+    @abstractmethod
+    async def get_password_reset_token(self, token: str) -> Optional[PasswordResetToken]:
+        pass
+
+    @abstractmethod
+    async def mark_token_as_used(self, token: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def delete_user_reset_tokens(self, user_id: int) -> bool:
         pass
 
 class SQLAlchemyUserRepository(UserRepositoryInterface):
@@ -135,6 +152,47 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
                 permissions.add(f"{permission.resource}:{permission.action}")
 
         return list(permissions)
+
+    async def create_password_reset_token(self, user_id: int, token: str, expires_at: datetime) -> PasswordResetToken:
+        """Create a new password reset token"""
+        reset_token = PasswordResetToken(
+            user_id=user_id,
+            token=token,
+            expires_at=expires_at,
+            used=False
+        )
+        self.db.add(reset_token)
+        self.db.commit()
+        self.db.refresh(reset_token)
+        return reset_token
+
+    async def get_password_reset_token(self, token: str) -> Optional[PasswordResetToken]:
+        """Get password reset token by token string"""
+        return self.db.query(PasswordResetToken).filter(
+            PasswordResetToken.token == token
+        ).first()
+
+    async def mark_token_as_used(self, token: str) -> bool:
+        """Mark a password reset token as used"""
+        reset_token = await self.get_password_reset_token(token)
+        if not reset_token:
+            return False
+
+        reset_token.used = True
+        self.db.commit()
+        return True
+
+    async def delete_user_reset_tokens(self, user_id: int) -> bool:
+        """Delete all password reset tokens for a user"""
+        tokens = self.db.query(PasswordResetToken).filter(
+            PasswordResetToken.user_id == user_id
+        ).all()
+
+        for token in tokens:
+            self.db.delete(token)
+
+        self.db.commit()
+        return True
 
 class RoleRepository:
     def __init__(self, db_session: Session):

@@ -69,6 +69,18 @@ class UserService:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        # Reject non-active accounts with a clear message
+        if user.status == "pending":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your account is pending admin approval.",
+            )
+        if user.status == "inactive":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your account has been deactivated. Please contact an admin.",
+            )
+
         # Get user permissions
         permissions = await self.user_repo.get_user_permissions(user.id)
 

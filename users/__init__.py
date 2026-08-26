@@ -1,12 +1,13 @@
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 # Core models and schemas
 from .models import (
-    User, Role, PermissionModel, PasswordResetToken,
-    UserCreate, UserUpdate, UserResponse, UserLogin, Token,
+    User, Role, PermissionModel, PasswordResetToken, EmailVerificationToken,
+    UserCreate, UserUpdate, UserSelfUpdate, UserRegister, UserResponse, UserLogin, Token,
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
-    UserStatus, Permission, configure_base,
-    PasswordResetRequest, PasswordResetConfirm, PasswordChange
+    UserStatus, Permission, configure_base, normalize_email,
+    PasswordResetRequest, PasswordResetConfirm, PasswordChange,
+    EmailVerificationConfirm, EmailVerificationResend
 )
 
 # Authentication
@@ -51,6 +52,12 @@ from .email_service import (
     configure_email_service, get_email_service
 )
 
+# Email verification / password reset policy
+from .verification import (
+    VerificationConfig, configure_verification, get_verification_config,
+    generate_token, hash_token
+)
+
 # MongoDB support (if available)
 try:
     from .database import (
@@ -70,6 +77,7 @@ def setup_users_package(
     access_token_expire_minutes: int = 30,
     create_tables: bool = True,
     email_config: EmailConfig = None,
+    verification_config: VerificationConfig = None,
     **database_kwargs
 ):
     """
@@ -81,6 +89,9 @@ def setup_users_package(
         algorithm: JWT algorithm (default: HS256)
         access_token_expire_minutes: Token expiry time in minutes
         create_tables: Whether to create database tables automatically
+        email_config: Email provider settings, required to send verification
+            and password reset emails
+        verification_config: Email verification and password reset policy
         **database_kwargs: Additional database configuration options
 
     Returns:
@@ -110,6 +121,10 @@ def setup_users_package(
     if email_config:
         configure_email_service(email_config)
 
+    # Configure verification policy if provided
+    if verification_config:
+        configure_verification(verification_config)
+
     return auth_manager, db_manager
 
 async def setup_users_package_async(
@@ -119,6 +134,7 @@ async def setup_users_package_async(
     access_token_expire_minutes: int = 30,
     create_tables: bool = True,
     email_config: EmailConfig = None,
+    verification_config: VerificationConfig = None,
     **database_kwargs
 ):
     """
@@ -130,6 +146,9 @@ async def setup_users_package_async(
         algorithm: JWT algorithm (default: HS256)
         access_token_expire_minutes: Token expiry time in minutes
         create_tables: Whether to create database tables automatically
+        email_config: Email provider settings, required to send verification
+            and password reset emails
+        verification_config: Email verification and password reset policy
         **database_kwargs: Additional database configuration options
 
     Returns:
@@ -158,6 +177,10 @@ async def setup_users_package_async(
     # Configure email service if provided
     if email_config:
         configure_email_service(email_config)
+
+    # Configure verification policy if provided
+    if verification_config:
+        configure_verification(verification_config)
 
     return auth_manager, db_manager
 
@@ -219,11 +242,12 @@ def create_default_roles():
 # Export convenience functions
 __all__ = [
     # Core models
-    "User", "Role", "PermissionModel", "PasswordResetToken",
-    "UserCreate", "UserUpdate", "UserResponse", "UserLogin", "Token",
+    "User", "Role", "PermissionModel", "PasswordResetToken", "EmailVerificationToken",
+    "UserCreate", "UserUpdate", "UserSelfUpdate", "UserRegister", "UserResponse", "UserLogin", "Token",
     "RoleCreate", "RoleResponse", "PermissionCreate", "PermissionResponse",
-    "UserStatus", "Permission", "configure_base",
+    "UserStatus", "Permission", "configure_base", "normalize_email",
     "PasswordResetRequest", "PasswordResetConfirm", "PasswordChange",
+    "EmailVerificationConfirm", "EmailVerificationResend",
 
     # Authentication
     "AuthConfig", "AuthManager", "PasswordManager", "JWTManager",
@@ -254,6 +278,10 @@ __all__ = [
     # Email service
     "EmailService", "EmailConfig",
     "configure_email_service", "get_email_service",
+
+    # Email verification / password reset policy
+    "VerificationConfig", "configure_verification", "get_verification_config",
+    "generate_token", "hash_token",
 
     # Setup functions
     "setup_users_package", "setup_users_package_async",

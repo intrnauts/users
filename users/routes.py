@@ -1,9 +1,10 @@
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from .models import (
-    UserCreate, UserUpdate, UserResponse, UserLogin, Token,
+    UserCreate, UserUpdate, UserSelfUpdate, UserRegister, UserResponse, UserLogin, Token,
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
-    PasswordResetRequest, PasswordResetConfirm, PasswordChange
+    PasswordResetRequest, PasswordResetConfirm, PasswordChange,
+    EmailVerificationConfirm, EmailVerificationResend
 )
 from .service import UserService, RoleService, PermissionService
 from .dependencies import (
@@ -16,7 +17,8 @@ def create_user_router(
     tags: List[str] = None,
     include_auth: bool = True,
     include_admin: bool = True,
-    password_reset_url_template: str = None
+    password_reset_url_template: str = None,
+    verification_url_template: str = None
 ) -> APIRouter:
     """Create a FastAPI router with user management endpoints"""
 
@@ -25,11 +27,11 @@ def create_user_router(
     if include_auth:
         @router.post("/register", response_model=UserResponse)
         async def register(
-            user_data: UserCreate,
+            user_data: UserRegister,
             user_service: UserService = Depends(get_user_service)
         ):
-            """Register a new user"""
-            return await user_service.create_user(user_data)
+            """Register a new user and send them a verification email"""
+            return await user_service.create_user(user_data.to_user_create())
 
         @router.post("/login", response_model=Token)
         async def login(
@@ -48,12 +50,18 @@ def create_user_router(
 
         @router.put("/me", response_model=UserResponse)
         async def update_current_user(
-            user_data: UserUpdate,
+            user_data: UserSelfUpdate,
             current_user = Depends(get_current_active_user),
             user_service: UserService = Depends(get_user_service)
         ):
-            """Update current user information"""
-            return await user_service.update_user(current_user.id, user_data)
+            """Update current user information
+
+            Accepts UserSelfUpdate, not UserUpdate: a user must not be able to
+            set their own status, roles or is_superuser here.
+            """
+            return await user_service.update_user(
+                current_user.id, UserUpdate(**user_data.model_dump(exclude_unset=True))
+            )
 
         @router.post("/change-password")
         async def change_password(
@@ -71,6 +79,27 @@ def create_user_router(
                     detail="Failed to change password"
                 )
             return {"message": "Password changed successfully"}
+
+        @router.post("/verify-email", response_model=UserResponse)
+        async def verify_email(
+            confirm_data: EmailVerificationConfirm,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Confirm an email address using the token from the verification email"""
+            return await user_service.verify_email(confirm_data)
+
+        @router.post("/verify-email/resend")
+        async def resend_verification_email(
+            request_data: EmailVerificationResend,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Request a fresh verification email"""
+            await user_service.resend_verification_email(
+                request_data,
+                verification_url_template=verification_url_template
+            )
+            # Always return success to prevent email enumeration
+            return {"message": "If the email exists and is unverified, a verification link has been sent"}
 
         @router.post("/password-reset/request")
         async def request_password_reset(

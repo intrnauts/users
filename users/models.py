@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Annotated
 from enum import Enum
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, BeforeValidator
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Table
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -18,6 +18,27 @@ def configure_base(custom_base=None):
     global Base
     if custom_base is not None:
         Base = custom_base
+
+def normalize_email(email):
+    """Canonicalise an email address for storage and lookup.
+
+    Domains are case-insensitive per RFC 5321, and while the local part is
+    formally case-sensitive, no mail provider in practice treats
+    User@example.com and user@example.com as different mailboxes. Without a
+    single canonical form the same person can hold two accounts, and a password
+    reset silently misses an account whose stored address differs only in case.
+
+    Non-string input is passed through untouched for Pydantic to reject.
+    """
+    if isinstance(email, str):
+        return email.strip().lower()
+    return email
+
+# Email fields normalize before validation, so every schema that carries an
+# address - and therefore every route - agrees on one canonical form.
+NormalizedEmail = Annotated[EmailStr, BeforeValidator(normalize_email)]
+OptionalNormalizedEmail = Annotated[Optional[EmailStr], BeforeValidator(normalize_email)]
+NormalizedEmailStr = Annotated[str, BeforeValidator(normalize_email)]
 
 class UserStatus(str, Enum):
     ACTIVE = "active"
@@ -99,6 +120,21 @@ class PasswordResetToken(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.users.id'), nullable=False)
+    # SHA-256 digest of the token, never the token itself. See users.verification.
+    token = Column(String(255), unique=True, index=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+
+class EmailVerificationToken(Base):
+    __tablename__ = "email_verification_tokens"
+    __table_args__ = {'schema': 'users'}
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.users.id'), nullable=False)
+    # SHA-256 digest of the token, never the token itself. See users.verification.
     token = Column(String(255), unique=True, index=True, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     used = Column(Boolean, default=False)
@@ -108,7 +144,7 @@ class PasswordResetToken(Base):
 
 # Pydantic schemas for API
 class UserBase(BaseModel):
-    email: EmailStr
+    email: NormalizedEmail
     username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -119,8 +155,45 @@ class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
     roles: Optional[List[str]] = []
 
+class UserRegister(BaseModel):
+    """Payload for public self-service registration.
+
+    Deliberately excludes status, is_superuser and roles: those are attacker
+    controlled on a public endpoint. Use UserCreate for admin or programmatic
+    creation where those fields are meant to be settable.
+    """
+    email: NormalizedEmail
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    password: str = Field(..., min_length=8)
+
+    def to_user_create(self) -> "UserCreate":
+        """Convert to a UserCreate with privileged fields forced to defaults."""
+        return UserCreate(
+            email=self.email,
+            username=self.username,
+            first_name=self.first_name,
+            last_name=self.last_name,
+            password=self.password,
+            status=UserStatus.PENDING,
+            is_superuser=False,
+            roles=[]
+        )
+
+class UserSelfUpdate(BaseModel):
+    """Fields a user is allowed to change on their own account.
+
+    Deliberately excludes status, is_superuser, is_verified and roles, so that
+    the self-service endpoint cannot be used for privilege escalation.
+    """
+    email: OptionalNormalizedEmail = None
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
 class UserUpdate(BaseModel):
-    email: Optional[EmailStr] = None
+    email: OptionalNormalizedEmail = None
     username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -140,7 +213,7 @@ class UserResponse(UserBase):
         from_attributes = True
 
 class UserLogin(BaseModel):
-    email: str
+    email: NormalizedEmailStr
     password: str
 
 class Token(BaseModel):
@@ -184,7 +257,7 @@ class PermissionResponse(PermissionBase):
 
 # Password reset schemas
 class PasswordResetRequest(BaseModel):
-    email: EmailStr
+    email: NormalizedEmail
 
 class PasswordResetConfirm(BaseModel):
     token: str
@@ -193,3 +266,10 @@ class PasswordResetConfirm(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
+
+# Email verification schemas
+class EmailVerificationConfirm(BaseModel):
+    token: str
+
+class EmailVerificationResend(BaseModel):
+    email: NormalizedEmail

@@ -3,7 +3,10 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
-from .models import User, Role, PermissionModel, PasswordResetToken, UserCreate, UserUpdate
+from .models import (
+    User, Role, PermissionModel, PasswordResetToken, EmailVerificationToken,
+    UserCreate, UserUpdate, normalize_email
+)
 
 class UserRepositoryInterface(ABC):
     @abstractmethod
@@ -39,19 +42,46 @@ class UserRepositoryInterface(ABC):
         pass
 
     @abstractmethod
-    async def create_password_reset_token(self, user_id: int, token: str, expires_at: datetime) -> PasswordResetToken:
+    async def set_password(self, user_id: int, hashed_password: str) -> bool:
         pass
 
     @abstractmethod
-    async def get_password_reset_token(self, token: str) -> Optional[PasswordResetToken]:
+    async def set_verified(self, user_id: int, is_verified: bool, status: str = None) -> Optional[User]:
+        pass
+
+    # Tokens are passed and stored as digests, never as the value emailed to the
+    # user. Callers hash with users.verification.hash_token first.
+
+    @abstractmethod
+    async def create_password_reset_token(self, user_id: int, token_hash: str, expires_at: datetime) -> PasswordResetToken:
         pass
 
     @abstractmethod
-    async def mark_token_as_used(self, token: str) -> bool:
+    async def get_password_reset_token(self, token_hash: str) -> Optional[PasswordResetToken]:
+        pass
+
+    @abstractmethod
+    async def mark_token_as_used(self, token_hash: str) -> bool:
         pass
 
     @abstractmethod
     async def delete_user_reset_tokens(self, user_id: int) -> bool:
+        pass
+
+    @abstractmethod
+    async def create_email_verification_token(self, user_id: int, token_hash: str, expires_at: datetime) -> EmailVerificationToken:
+        pass
+
+    @abstractmethod
+    async def get_email_verification_token(self, token_hash: str) -> Optional[EmailVerificationToken]:
+        pass
+
+    @abstractmethod
+    async def mark_verification_token_as_used(self, token_hash: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def delete_user_verification_tokens(self, user_id: int) -> bool:
         pass
 
 class SQLAlchemyUserRepository(UserRepositoryInterface):
@@ -60,7 +90,9 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
 
     async def create_user(self, user_data: UserCreate) -> User:
         db_user = User(
-            email=user_data.email,
+            # Normalized again here, not just in the schema, so callers that
+            # build a UserCreate by hand cannot store a mixed-case address.
+            email=normalize_email(user_data.email),
             username=user_data.username,
             first_name=user_data.first_name,
             last_name=user_data.last_name,
@@ -86,7 +118,9 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         return self.db.query(User).filter(User.id == user_id).first()
 
     async def get_user_by_email(self, email: str) -> Optional[User]:
-        return self.db.query(User).filter(User.email == email).first()
+        return self.db.query(User).filter(
+            User.email == normalize_email(email)
+        ).first()
 
     async def get_user_by_username(self, username: str) -> Optional[User]:
         return self.db.query(User).filter(User.username == username).first()
@@ -98,6 +132,9 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
 
         update_data = user_data.model_dump(exclude_unset=True)
         roles_to_update = update_data.pop('roles', None)
+
+        if update_data.get('email') is not None:
+            update_data['email'] = normalize_email(update_data['email'])
 
         for field, value in update_data.items():
             setattr(db_user, field, value)
@@ -153,11 +190,42 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
 
         return list(permissions)
 
-    async def create_password_reset_token(self, user_id: int, token: str, expires_at: datetime) -> PasswordResetToken:
-        """Create a new password reset token"""
+    async def set_password(self, user_id: int, hashed_password: str) -> bool:
+        """Set a user's password hash directly.
+
+        Password is not a field on UserUpdate, so it cannot be routed through
+        update_user() - doing so silently discards it.
+        """
+        db_user = await self.get_user_by_id(user_id)
+        if not db_user:
+            return False
+
+        db_user.hashed_password = hashed_password
+        self.db.commit()
+        return True
+
+    async def set_verified(self, user_id: int, is_verified: bool, status: str = None) -> Optional[User]:
+        """Set a user's verified flag, and optionally their status.
+
+        is_verified is not a field on UserUpdate for the same reason as above.
+        """
+        db_user = await self.get_user_by_id(user_id)
+        if not db_user:
+            return None
+
+        db_user.is_verified = is_verified
+        if status is not None:
+            db_user.status = status
+
+        self.db.commit()
+        self.db.refresh(db_user)
+        return db_user
+
+    async def create_password_reset_token(self, user_id: int, token_hash: str, expires_at: datetime) -> PasswordResetToken:
+        """Create a new password reset token from its digest"""
         reset_token = PasswordResetToken(
             user_id=user_id,
-            token=token,
+            token=token_hash,
             expires_at=expires_at,
             used=False
         )
@@ -166,15 +234,15 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         self.db.refresh(reset_token)
         return reset_token
 
-    async def get_password_reset_token(self, token: str) -> Optional[PasswordResetToken]:
-        """Get password reset token by token string"""
+    async def get_password_reset_token(self, token_hash: str) -> Optional[PasswordResetToken]:
+        """Get password reset token by its digest"""
         return self.db.query(PasswordResetToken).filter(
-            PasswordResetToken.token == token
+            PasswordResetToken.token == token_hash
         ).first()
 
-    async def mark_token_as_used(self, token: str) -> bool:
+    async def mark_token_as_used(self, token_hash: str) -> bool:
         """Mark a password reset token as used"""
-        reset_token = await self.get_password_reset_token(token)
+        reset_token = await self.get_password_reset_token(token_hash)
         if not reset_token:
             return False
 
@@ -186,6 +254,47 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         """Delete all password reset tokens for a user"""
         tokens = self.db.query(PasswordResetToken).filter(
             PasswordResetToken.user_id == user_id
+        ).all()
+
+        for token in tokens:
+            self.db.delete(token)
+
+        self.db.commit()
+        return True
+
+    async def create_email_verification_token(self, user_id: int, token_hash: str, expires_at: datetime) -> EmailVerificationToken:
+        """Create a new email verification token from its digest"""
+        verification_token = EmailVerificationToken(
+            user_id=user_id,
+            token=token_hash,
+            expires_at=expires_at,
+            used=False
+        )
+        self.db.add(verification_token)
+        self.db.commit()
+        self.db.refresh(verification_token)
+        return verification_token
+
+    async def get_email_verification_token(self, token_hash: str) -> Optional[EmailVerificationToken]:
+        """Get email verification token by its digest"""
+        return self.db.query(EmailVerificationToken).filter(
+            EmailVerificationToken.token == token_hash
+        ).first()
+
+    async def mark_verification_token_as_used(self, token_hash: str) -> bool:
+        """Mark an email verification token as used"""
+        verification_token = await self.get_email_verification_token(token_hash)
+        if not verification_token:
+            return False
+
+        verification_token.used = True
+        self.db.commit()
+        return True
+
+    async def delete_user_verification_tokens(self, user_id: int) -> bool:
+        """Delete all email verification tokens for a user"""
+        tokens = self.db.query(EmailVerificationToken).filter(
+            EmailVerificationToken.user_id == user_id
         ).all()
 
         for token in tokens:

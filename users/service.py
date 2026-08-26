@@ -1,11 +1,18 @@
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-import secrets
 from fastapi import HTTPException, status
-from .models import User, UserCreate, UserUpdate, UserLogin, Token, UserResponse, PasswordResetRequest, PasswordResetConfirm
+from .models import (
+    User, UserCreate, UserUpdate, UserLogin, Token, UserResponse, UserStatus,
+    PasswordResetRequest, PasswordResetConfirm,
+    EmailVerificationConfirm, EmailVerificationResend
+)
 from .repository import UserRepositoryInterface, RoleRepository, PermissionRepository
 from .auth import get_auth_manager
 from .email_service import get_email_service
+from .verification import generate_token, hash_token, get_verification_config
+
+logger = logging.getLogger(__name__)
 
 class UserService:
     def __init__(
@@ -45,7 +52,55 @@ class UserService:
 
         db_user = await self.user_repo.create_user(user_create_data)
 
+        # Send the verification email. A failure here (no email service
+        # configured, SMTP down) must not fail the registration - the user can
+        # always request a new link via resend_verification_email().
+        config = get_verification_config()
+        if config.send_verification_on_register:
+            await self._send_verification_email(db_user, config.verification_url_template)
+
         return self._user_to_response(db_user)
+
+    async def _send_verification_email(
+        self,
+        user: User,
+        verification_url_template: str = None
+    ) -> bool:
+        """Issue a fresh verification token for a user and email it to them.
+
+        Returns True if the email was handed off successfully. Never raises:
+        callers treat email delivery as best effort.
+        """
+        config = get_verification_config()
+
+        if verification_url_template is None:
+            verification_url_template = config.verification_url_template
+
+        try:
+            raw_token = generate_token()
+            expires_at = datetime.utcnow() + timedelta(
+                hours=config.verification_token_ttl_hours
+            )
+
+            # Only ever one live verification link per user.
+            await self.user_repo.delete_user_verification_tokens(user.id)
+            await self.user_repo.create_email_verification_token(
+                user_id=user.id,
+                token_hash=hash_token(raw_token),
+                expires_at=expires_at
+            )
+
+            email_service = get_email_service()
+            return await email_service.send_verification_email(
+                recipient_email=user.email,
+                verification_token=raw_token,
+                verification_url_template=verification_url_template
+            )
+        except Exception as e:
+            # Includes the token write, so that a database problem here cannot
+            # fail a registration that has already been committed.
+            logger.error(f"Failed to send verification email: {e}")
+            return False
 
     async def authenticate_user(self, login_data: UserLogin) -> Optional[User]:
         user = await self.user_repo.get_user_by_email(login_data.email)
@@ -69,17 +124,34 @@ class UserService:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        config = get_verification_config()
+
+        # A user who was sent a verification link and has not used it should be
+        # told to check their email, not that they are waiting on an admin.
+        awaiting_verification = not user.is_verified and (
+            config.require_verified_email or config.send_verification_on_register
+        )
+        verification_error = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Please verify your email address before logging in.",
+        )
+
         # Reject non-active accounts with a clear message
-        if user.status == "pending":
+        if user.status == UserStatus.PENDING.value:
+            if awaiting_verification:
+                raise verification_error
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Your account is pending admin approval.",
             )
-        if user.status == "inactive":
+        if user.status == UserStatus.INACTIVE.value:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Your account has been deactivated. Please contact an admin.",
             )
+
+        if config.require_verified_email and not user.is_verified:
+            raise verification_error
 
         # Get user permissions
         permissions = await self.user_repo.get_user_permissions(user.id)
@@ -157,19 +229,106 @@ class UserService:
                 detail="Current password is incorrect"
             )
 
-        # Hash new password and update
+        # Hash new password and update. This must go through set_password:
+        # UserUpdate has no password field, so update_user() would drop it.
         new_hashed_password = auth_manager.hash_password(new_password)
-        update_data = UserUpdate(password=new_hashed_password)
-        await self.user_repo.update_user(user_id, update_data)
-        return True
+        return await self.user_repo.set_password(user_id, new_hashed_password)
 
     async def verify_user(self, user_id: int) -> Optional[UserResponse]:
+        """Mark a user verified and active without a token (admin action)."""
         user = await self.user_repo.get_user_by_id(user_id)
         if not user:
             return None
 
-        update_data = UserUpdate(is_verified=True, status="active")
-        updated_user = await self.user_repo.update_user(user_id, update_data)
+        # Must go through set_verified: UserUpdate has no is_verified field, so
+        # update_user() would silently drop it.
+        updated_user = await self.user_repo.set_verified(
+            user_id, is_verified=True, status=UserStatus.ACTIVE.value
+        )
+        return self._user_to_response(updated_user)
+
+    async def send_verification_email(
+        self,
+        user_id: int,
+        verification_url_template: str = None
+    ) -> bool:
+        """Issue and send a verification link for a known user id."""
+        user = await self.user_repo.get_user_by_id(user_id)
+        if not user:
+            return False
+        return await self._send_verification_email(user, verification_url_template)
+
+    async def resend_verification_email(
+        self,
+        request_data: EmailVerificationResend,
+        verification_url_template: str = None
+    ) -> bool:
+        """Send a fresh verification link to an email address.
+
+        Always returns True, whether or not the address belongs to an account,
+        so the endpoint cannot be used to enumerate registered emails.
+        """
+        user = await self.user_repo.get_user_by_email(request_data.email)
+        if not user:
+            return True
+
+        # Nothing to do for an already verified address, and re-issuing a token
+        # would let anyone invalidate a verified user's state.
+        if user.is_verified:
+            return True
+
+        await self._send_verification_email(user, verification_url_template)
+        return True
+
+    async def verify_email(self, confirm_data: EmailVerificationConfirm) -> UserResponse:
+        """Consume an email verification token and mark the user verified.
+
+        Raises:
+            HTTPException: if the token is unknown, already used or expired.
+        """
+        token_hash = hash_token(confirm_data.token)
+        verification_token = await self.user_repo.get_email_verification_token(token_hash)
+
+        if not verification_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification token"
+            )
+
+        if verification_token.used:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification token has already been used"
+            )
+
+        if datetime.utcnow() > verification_token.expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification token has expired"
+            )
+
+        user = await self.user_repo.get_user_by_id(verification_token.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        # Promote a pending signup to active only when configured to do so, so
+        # projects that also want an admin approval step keep it.
+        config = get_verification_config()
+        new_status = None
+        if config.auto_activate_on_verify and user.status == UserStatus.PENDING.value:
+            new_status = UserStatus.ACTIVE.value
+
+        updated_user = await self.user_repo.set_verified(
+            user.id, is_verified=True, status=new_status
+        )
+
+        # Burn the token, then drop any others so a link cannot be replayed.
+        await self.user_repo.mark_verification_token_as_used(token_hash)
+        await self.user_repo.delete_user_verification_tokens(user.id)
+
         return self._user_to_response(updated_user)
 
     async def get_user_permissions(self, user_id: int) -> List[str]:
@@ -197,19 +356,23 @@ class UserService:
         if not user:
             return True
 
-        # Generate secure random token
-        reset_token = secrets.token_urlsafe(32)
+        config = get_verification_config()
 
-        # Token expires in 1 hour
-        expires_at = datetime.utcnow() + timedelta(hours=1)
+        # Generate secure random token
+        reset_token = generate_token()
+
+        expires_at = datetime.utcnow() + timedelta(
+            hours=config.password_reset_token_ttl_hours
+        )
 
         # Delete any existing reset tokens for this user
         await self.user_repo.delete_user_reset_tokens(user.id)
 
-        # Store token in database
+        # Store only the digest - the raw token goes out by email and is never
+        # persisted, so a database dump yields no usable reset link.
         await self.user_repo.create_password_reset_token(
             user_id=user.id,
-            token=reset_token,
+            token_hash=hash_token(reset_token),
             expires_at=expires_at
         )
 
@@ -223,8 +386,7 @@ class UserService:
             )
         except Exception as e:
             # Log error but don't expose it to prevent information leakage
-            import logging
-            logging.error(f"Failed to send password reset email: {e}")
+            logger.error(f"Failed to send password reset email: {e}")
 
         return True
 
@@ -241,8 +403,9 @@ class UserService:
         Raises:
             HTTPException: If token is invalid, expired, or already used
         """
-        # Get token from database
-        reset_token = await self.user_repo.get_password_reset_token(confirm_data.token)
+        # Look the token up by digest; only the digest is stored.
+        token_hash = hash_token(confirm_data.token)
+        reset_token = await self.user_repo.get_password_reset_token(token_hash)
 
         if not reset_token:
             raise HTTPException(
@@ -276,12 +439,13 @@ class UserService:
         auth_manager = get_auth_manager()
         new_hashed_password = auth_manager.hash_password(confirm_data.new_password)
 
-        # Update user's password
-        user.hashed_password = new_hashed_password
-        self.user_repo.db.commit()
+        # Update user's password through the repository rather than reaching
+        # into its session, so non-SQLAlchemy repositories work too.
+        await self.user_repo.set_password(user.id, new_hashed_password)
 
-        # Mark token as used
-        await self.user_repo.mark_token_as_used(confirm_data.token)
+        # Burn the token, then drop any others so a link cannot be replayed.
+        await self.user_repo.mark_token_as_used(token_hash)
+        await self.user_repo.delete_user_reset_tokens(user.id)
 
         return True
 

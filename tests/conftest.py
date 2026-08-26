@@ -1,7 +1,7 @@
 import pytest
 import tempfile
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from users.models import Base
 from users.auth import AuthConfig, configure_auth
@@ -23,15 +23,31 @@ def auth_manager(auth_config):
     """Configured auth manager for testing"""
     return configure_auth(auth_config)
 
+def _sqlite_engine(database_url, schema_path):
+    """Build a SQLite engine that can satisfy the models' `users` schema.
+
+    The models declare schema='users' for PostgreSQL. SQLite has no schemas, but
+    an ATTACHed database serves the same qualified-name role, so every pooled
+    connection attaches one under the name `users`.
+    """
+    engine = create_engine(database_url, echo=False)
+
+    @event.listens_for(engine, "connect")
+    def _attach_users_schema(dbapi_connection, _connection_record):
+        dbapi_connection.execute(f"ATTACH DATABASE '{schema_path}' AS users")
+
+    return engine
+
 @pytest.fixture
 def test_db():
     """Create a temporary SQLite database for testing"""
     # Create temporary file
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
+    schema_fd, schema_path = tempfile.mkstemp(suffix='.users.db')
     database_url = f"sqlite:///{db_path}"
 
     # Create engine and tables
-    engine = create_engine(database_url, echo=False)
+    engine = _sqlite_engine(database_url, schema_path)
     Base.metadata.create_all(bind=engine)
 
     # Create session factory
@@ -40,8 +56,11 @@ def test_db():
     yield SessionLocal
 
     # Cleanup
+    engine.dispose()
     os.close(db_fd)
     os.unlink(db_path)
+    os.close(schema_fd)
+    os.unlink(schema_path)
 
 @pytest.fixture
 def db_session(test_db):

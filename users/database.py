@@ -1,5 +1,5 @@
-from typing import Optional, AsyncGenerator
-from sqlalchemy import create_engine
+from typing import Optional, AsyncGenerator, Set
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -7,6 +7,26 @@ def get_base():
     """Get the configured Base class"""
     from .models import Base
     return Base
+
+def get_required_schemas(metadata) -> Set[str]:
+    """Names of the non-default schemas the mapped tables live in.
+
+    The models are schema-qualified (schema='users'), and create_all() will not
+    create a schema that does not already exist, so a fresh database needs it
+    issued first.
+    """
+    return {table.schema for table in metadata.tables.values() if table.schema}
+
+def create_schemas(connection, metadata):
+    """Create any schemas the mapped tables need, on backends that have them.
+
+    A no-op on SQLite and MySQL, which have no CREATE SCHEMA in this sense.
+    """
+    if connection.dialect.name not in ("postgresql", "mssql"):
+        return
+
+    for schema in sorted(get_required_schemas(metadata)):
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
 
 class DatabaseConfig:
     def __init__(
@@ -45,9 +65,11 @@ class SyncDatabaseManager:
         )
 
     def create_tables(self):
-        """Create all tables"""
+        """Create all schemas and tables"""
         Base = get_base()
-        Base.metadata.create_all(bind=self.engine)
+        with self.engine.begin() as conn:
+            create_schemas(conn, Base.metadata)
+            Base.metadata.create_all(bind=conn)
 
     def drop_tables(self):
         """Drop all tables"""
@@ -93,9 +115,10 @@ class AsyncDatabaseManager:
         )
 
     async def create_tables(self):
-        """Create all tables"""
+        """Create all schemas and tables"""
         Base = get_base()
         async with self.engine.begin() as conn:
+            await conn.run_sync(create_schemas, Base.metadata)
             await conn.run_sync(Base.metadata.create_all)
 
     async def drop_tables(self):

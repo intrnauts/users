@@ -7,7 +7,8 @@ A flexible and robust user management package for FastAPI backends, providing au
 - 🔐 **JWT Authentication** - Secure token-based authentication
 - 👥 **User Management** - Complete CRUD operations for users
 - 🛡️ **Role-Based Access Control (RBAC)** - Flexible permission system
-- 📧 **Email Integration** - AWS SES support for password reset and verification
+- 📧 **Email Integration** - AWS SES and SMTP support for password reset and verification
+- ✉️ **Email Verification** - Signup verification flow with configurable activation policy
 - 🔑 **Password Reset** - Secure token-based password reset flow
 - 🔧 **Database Adapters** - Support for SQLAlchemy and MongoDB
 - 🚀 **FastAPI Integration** - Ready-to-use dependencies and routers
@@ -222,6 +223,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `GET /users/me` - Get current user info
 - `PUT /users/me` - Update current user
 - `POST /users/change-password` - Change password (requires current password)
+- `POST /users/verify-email` - Confirm an email address with the token from the verification email
+- `POST /users/verify-email/resend` - Request a fresh verification email
 - `POST /users/password-reset/request` - Request password reset (sends email)
 - `POST /users/password-reset/confirm` - Confirm password reset with token
 
@@ -363,11 +366,17 @@ PASSWORD_RESET_URL_TEMPLATE=https://yourapp.com/reset-password?token={token}
 
 ### Security Features
 
-- **Token expiration**: Reset tokens expire after 1 hour
-- **One-time use**: Tokens are marked as used after successful password reset
-- **Email enumeration prevention**: API always returns success, even if email doesn't exist
-- **Secure token generation**: Uses `secrets.token_urlsafe()` for cryptographically secure tokens
-- **Token invalidation**: All existing tokens are deleted when a new one is requested
+Both the password reset and email verification flows share these properties:
+
+- **Hashed at rest**: only a SHA-256 digest of each token is stored. The raw token
+  exists in the email and nowhere else, so a database dump, leaked backup or SQL
+  injection yields no usable link
+- **Token expiration**: reset tokens expire after 1 hour, verification tokens after 24
+- **One-time use**: tokens are burned on success and cannot be replayed
+- **Email enumeration prevention**: the request endpoints always return success,
+  whether or not the address belongs to an account
+- **Secure token generation**: 256 bits of entropy from `secrets.token_urlsafe()`
+- **Token invalidation**: issuing a new token deletes any outstanding ones
 
 ### Disable Email for Testing
 
@@ -380,6 +389,144 @@ email_config = EmailConfig(
 ```
 
 When disabled, the reset token will be logged to the console instead of sent via email.
+
+## Email Addresses Are Case-Insensitive
+
+Addresses are trimmed and lowercased before they are stored or matched, so
+`Manzoor@Example.com`, `manzoor@example.com` and `MANZOOR@EXAMPLE.COM` are one
+account everywhere: registration, login, password reset and verification.
+
+Domains are case-insensitive per RFC 5321, and while the local part is formally
+case-sensitive, no mail provider treats it that way. PostgreSQL compares strings
+case-sensitively, so without this the same person could hold two accounts and a
+password reset could silently miss the one it did not match - silently, because
+the endpoint is deliberately enumeration-safe and reports success either way.
+
+Normalization happens in two places: a `BeforeValidator` on every schema that
+carries an address, and again in `SQLAlchemyUserRepository`, so a caller that
+builds a `UserCreate` by hand cannot bypass it. `normalize_email()` is exported
+if you need the same canonical form in your own code.
+
+```python
+from users import normalize_email
+
+normalize_email("  Manzoor@Example.COM ")  # "manzoor@example.com"
+```
+
+`username` is **not** normalized - it is a display name, and you may want to
+preserve its casing. If you want usernames case-insensitive too, that is your
+application's call.
+
+### Migrating existing data
+
+**Rows written before this change may hold mixed case, and those users will not
+be found at login until they are backfilled.** Apply
+`migrations/0002_normalize_email_case.py`.
+
+If two accounts differ only by case, the migration aborts and names them rather
+than half-applying:
+
+```
+RuntimeError: Cannot normalize email case: these addresses map to more than one account.
+
+  dupe@example.com <- 2 accounts: 4:Dupe@Example.com, 5:dupe@example.com
+```
+
+Deciding which account survives is not something a migration should guess at.
+Merge or delete the duplicates - checking which one owns the real data, including
+rows in your own tables keyed on the user id - then run it again.
+
+## Email Verification
+
+New signups are emailed a verification link. Confirming it sets `is_verified`
+and, by default, promotes the account from `pending` to `active`.
+
+### Setup
+
+```python
+from users import setup_users_package, EmailConfig, VerificationConfig
+
+setup_users_package(
+    secret_key="your-secret-key",
+    database_url="postgresql://user:pass@localhost/db",
+    email_config=EmailConfig(
+        provider="ses",
+        sender_email="noreply@yourdomain.com",
+        sender_name="Your App",
+    ),
+    verification_config=VerificationConfig(
+        verification_url_template="https://yourapp.com/verify-email?token={token}",
+        require_verified_email=True,
+    ),
+)
+```
+
+### Configuration
+
+| Setting | Default | Effect |
+|---|---|---|
+| `send_verification_on_register` | `True` | Email a verification link from `create_user()` |
+| `auto_activate_on_verify` | `True` | Move a `pending` user to `active` on verification. Set `False` to keep an admin approval step after verification |
+| `require_verified_email` | `False` | Refuse login until the address is verified |
+| `verification_token_ttl_hours` | `24` | Verification link lifetime |
+| `password_reset_token_ttl_hours` | `1` | Reset link lifetime |
+| `verification_url_template` | `None` | URL containing a `{token}` placeholder. Without one the email carries the bare token |
+
+### Flow
+
+```
+POST /users/register        -> status=pending, is_verified=false, email sent
+                               (status, is_superuser and roles in the request
+                                body are ignored - see UserRegister)
+
+# user clicks the link, your frontend reads ?token= and posts it back
+POST /users/verify-email    {"token": "..."}
+                            -> is_verified=true, status=active
+
+POST /users/login           -> access token
+
+# link expired or never arrived
+POST /users/verify-email/resend  {"email": "user@example.com"}
+```
+
+`verify-email/resend` always returns success, whether or not the address exists,
+so it cannot be used to enumerate accounts. Issuing a new token invalidates any
+previous one.
+
+### Keeping an admin approval step
+
+With `auto_activate_on_verify=False`, verification proves the address but leaves
+the account `pending`, and an admin still has to activate it:
+
+```python
+VerificationConfig(auto_activate_on_verify=False)
+```
+
+`POST /users/{user_id}/verify` remains available as an admin override that marks
+a user verified and active without a token.
+
+### Database migration
+
+Email verification adds one table, `users.email_verification_tokens`. A ready
+Alembic revision is in `migrations/0001_add_email_verification_tokens.py`:
+
+```bash
+cp migrations/0001_add_email_verification_tokens.py <your-project>/alembic/versions/
+# set down_revision to your current head, then
+alembic upgrade head
+```
+
+It creates the table and deletes the rows in `users.password_reset_tokens`.
+Those rows hold plaintext tokens that digest lookup can no longer match, so they
+are unusable but would still hand out a working reset link to anyone who reads
+the table. Anyone mid-reset requests a new link.
+
+For a brand new database, `setup_users_package(create_tables=True)` now creates
+the `users` schema before the tables, so no manual `CREATE SCHEMA` is needed.
+
+Users who registered before this change have `is_verified = false`. Leave
+`require_verified_email` off until you have either backfilled them or asked them
+to verify, or they will be locked out.
 
 ## Models
 
@@ -460,6 +607,10 @@ python advanced_fastapi_app.py
 - Implement proper CORS policies
 - Use environment variables for sensitive configuration
 - Enable database connection encryption in production
+- Rate-limit `/users/login`, `/users/password-reset/request` and
+  `/users/verify-email/resend` at your gateway - the package does not do this
+- Note that a password reset does not revoke access tokens already issued to
+  that user; they remain valid until they expire
 
 ## License
 
@@ -473,10 +624,33 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.2.0 (Latest)
+### v0.3.0 (Latest)
+- 📧 Email addresses are now normalized to trimmed lowercase on both storage and
+  lookup, so case can no longer split one mailbox across two accounts or make a
+  password reset silently miss. Exported as `normalize_email()`.
+  **Existing mixed-case rows need `migrations/0002_normalize_email_case.py`**
+- ✉️ Added email verification for new signups: `POST /users/verify-email` and
+  `POST /users/verify-email/resend`, the `EmailVerificationToken` model and
+  `EmailVerificationConfirm` / `EmailVerificationResend` schemas
+- ⚙️ Added `VerificationConfig` to control activation and login policy
+- 🔒 Reset and verification tokens are now stored as SHA-256 digests rather than
+  in plaintext. **Outstanding password reset links stop working on upgrade**
+- 🛡️ `POST /users/register` now takes `UserRegister`, which ignores `status`,
+  `is_superuser` and `roles`; `PUT /users/me` now takes `UserSelfUpdate`. Both
+  previously accepted `UserCreate`/`UserUpdate` and allowed self-escalation
+- 🐛 Fixed `change_password()` silently discarding the new password, and
+  `verify_user()` silently discarding `is_verified` — both routed through
+  `UserUpdate`, which has no such fields
+- 🐛 Fixed `confirm_password_reset()` reaching into the repository's session
+- 🐘 `create_tables()` now issues `CREATE SCHEMA IF NOT EXISTS` before creating
+  tables. The models are schema-qualified (`schema='users'`), so bootstrapping a
+  fresh PostgreSQL database previously failed with `InvalidSchemaName`
+- 📌 Pinned `bcrypt<4.1` — passlib 1.7.4 raises `ValueError` on every hash with
+  bcrypt 4.1+ — and declared the `pydantic[email]` extra that `EmailStr` needs
+
+### v0.2.0
 - 📧 Added email service integration with AWS SES
 - 🔑 Added password reset functionality
-- 📝 Added email verification support (coming soon)
 - 🔒 Enhanced security with token expiration and one-time use
 - 📚 Updated documentation with email integration examples
 - ✨ Added `PasswordResetRequest`, `PasswordResetConfirm`, and `PasswordChange` schemas

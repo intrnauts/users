@@ -37,6 +37,10 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# provider="resend" sends over HTTPS, the only transport that works on hosts
+# where outbound SMTP is blocked (#15). Optional so existing consumers that use
+# SES or SMTP are unaffected, mirroring how boto3 is already an optional import.
+resend = ["httpx>=0.24.0"]
 mongodb = ["motor>=3.0.0", "pymongo>=4.0.0"]
 redis = ["redis>=4.0.0"]
 dev = ["pytest>=7.0.0", "pytest-asyncio>=0.20.0", "black>=22.0.0", "isort>=5.0.0", "mypy>=1.0.0"]

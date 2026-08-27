@@ -18,6 +18,18 @@ class EmailConfig:
     # AWS SES settings
     aws_region: str = "us-east-1"
 
+    # HTTPS API settings (provider="resend")
+    #
+    # SMTP is blocked outbound on the VPS that hosts these projects, and SES means
+    # an AWS account this estate no longer has, so an HTTPS provider is the only
+    # path that reaches the outside world (#15).
+    api_key: Optional[str] = None
+    api_base_url: str = "https://api.resend.com"
+    # A send happens inside a request handler. Without a timeout a hung provider
+    # would hold the worker open for the socket default, turning an undelivered
+    # email into a slow endpoint.
+    timeout_seconds: float = 10.0
+
     # SMTP settings (for Gmail, etc.)
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 465  # SSL port
@@ -55,6 +67,25 @@ class EmailService:
                 logger.warning("SMTP username/password not configured - email service will not work")
             else:
                 logger.info(f"Email service initialized with SMTP ({config.smtp_host}:{config.smtp_port})")
+
+        elif config.provider == "resend":
+            # Report both faults at startup rather than at first send. An
+            # undelivered email is discovered by a user who never receives it,
+            # which is a terrible place to learn the API key was missing.
+            if not config.api_key:
+                logger.error("Resend API key not configured - email service will not work")
+            try:
+                import httpx  # noqa: F401
+                if config.api_key:
+                    logger.info(f"Email service initialized with Resend ({config.api_base_url})")
+            except ImportError:
+                logger.error(
+                    "httpx not installed - email service will not work. "
+                    "Install the extra: pip install 'users[resend]'"
+                )
+
+        else:
+            logger.error(f"Unknown email provider: {config.provider}")
 
     def _send_via_smtp(self, recipient_email: str, subject: str, body_text: str, body_html: str) -> bool:
         """Send email via SMTP (Gmail, etc.)"""
@@ -113,6 +144,99 @@ class EmailService:
             logger.error(f"Failed to send email via SES to {recipient_email}: {e}")
             return False
 
+    async def _send_via_resend(
+        self, recipient_email: str, subject: str, body_text: str, body_html: str
+    ) -> bool:
+        """Send via Resend's HTTPS API.
+
+        This is the only provider that is genuinely async — SES and SMTP both block
+        the event loop, which they always have. Kept that way deliberately: making
+        them async too would be a behaviour change to paths this issue is not about.
+        """
+        try:
+            import httpx
+        except ImportError:
+            logger.error(
+                "httpx not installed - cannot send via Resend. "
+                "Install the extra: pip install 'users[resend]'"
+            )
+            return False
+
+        payload = {
+            "from": f"{self.config.sender_name} <{self.config.sender_email}>",
+            "to": [recipient_email],
+            "subject": subject,
+            "text": body_text,
+            "html": body_html,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                response = await client.post(
+                    f"{self.config.api_base_url.rstrip('/')}/emails",
+                    headers={
+                        "Authorization": f"Bearer {self.config.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+
+            if response.status_code >= 400:
+                # The body carries the actual reason (unverified domain, bad key,
+                # rate limit). Logging only the status would strip the one detail
+                # that makes the failure actionable.
+                logger.error(
+                    f"Failed to send email via Resend to {recipient_email}: "
+                    f"HTTP {response.status_code} {response.text[:500]}"
+                )
+                return False
+
+            message_id = ""
+            try:
+                message_id = response.json().get("id", "")
+            except ValueError:
+                pass  # a 2xx with an unparseable body still means it was accepted
+
+            logger.info(f"Email sent via Resend to {recipient_email}. MessageId: {message_id}")
+            return True
+
+        except Exception as e:
+            # Non-fatal by contract: the caller logs and carries on, and this text
+            # is the entire diagnostic surface when mail silently fails to arrive.
+            logger.error(f"Failed to send email via Resend to {recipient_email}: {e}")
+            return False
+
+    def _readiness_error(self) -> Optional[str]:
+        """Return why this service cannot send, or None if it can.
+
+        Extracted because the same checks were duplicated across both send methods;
+        a third provider would have meant four more near-identical branches.
+        """
+        if self.config.provider == "ses" and not self._ses_client:
+            return "SES client not initialized"
+        if self.config.provider == "smtp" and (
+            not self.config.smtp_username or not self.config.smtp_password
+        ):
+            return "SMTP credentials not configured"
+        if self.config.provider == "resend" and not self.config.api_key:
+            return "Resend API key not configured"
+        if self.config.provider not in ("ses", "smtp", "resend"):
+            return f"Unknown email provider: {self.config.provider}"
+        return None
+
+    async def _dispatch(
+        self, recipient_email: str, subject: str, body_text: str, body_html: str
+    ) -> bool:
+        """Route one message to the configured provider."""
+        if self.config.provider == "resend":
+            return await self._send_via_resend(recipient_email, subject, body_text, body_html)
+        if self.config.provider == "ses":
+            return self._send_via_ses(recipient_email, subject, body_text, body_html)
+        if self.config.provider == "smtp":
+            return self._send_via_smtp(recipient_email, subject, body_text, body_html)
+        logger.error(f"Unknown email provider: {self.config.provider}")
+        return False
+
     async def send_password_reset_email(
         self,
         recipient_email: str,
@@ -136,11 +260,9 @@ class EmailService:
             return True
 
         # Check if email service is properly configured
-        if self.config.provider == "ses" and not self._ses_client:
-            logger.error("SES client not initialized")
-            return False
-        elif self.config.provider == "smtp" and (not self.config.smtp_username or not self.config.smtp_password):
-            logger.error("SMTP credentials not configured")
+        readiness_error = self._readiness_error()
+        if readiness_error:
+            logger.error(readiness_error)
             return False
 
         # Construct reset URL or use token directly
@@ -186,14 +308,7 @@ Best regards,
 </html>
 """
 
-        # Send email based on provider
-        if self.config.provider == "ses":
-            return self._send_via_ses(recipient_email, subject, body_text, body_html)
-        elif self.config.provider == "smtp":
-            return self._send_via_smtp(recipient_email, subject, body_text, body_html)
-        else:
-            logger.error(f"Unknown email provider: {self.config.provider}")
-            return False
+        return await self._dispatch(recipient_email, subject, body_text, body_html)
 
     async def send_verification_email(
         self,
@@ -217,11 +332,9 @@ Best regards,
             return True
 
         # Check if email service is properly configured
-        if self.config.provider == "ses" and not self._ses_client:
-            logger.error("SES client not initialized")
-            return False
-        elif self.config.provider == "smtp" and (not self.config.smtp_username or not self.config.smtp_password):
-            logger.error("SMTP credentials not configured")
+        readiness_error = self._readiness_error()
+        if readiness_error:
+            logger.error(readiness_error)
             return False
 
         # Construct verification URL or use token directly
@@ -264,14 +377,7 @@ Best regards,
 </html>
 """
 
-        # Send email based on provider
-        if self.config.provider == "ses":
-            return self._send_via_ses(recipient_email, subject, body_text, body_html)
-        elif self.config.provider == "smtp":
-            return self._send_via_smtp(recipient_email, subject, body_text, body_html)
-        else:
-            logger.error(f"Unknown email provider: {self.config.provider}")
-            return False
+        return await self._dispatch(recipient_email, subject, body_text, body_html)
 
 # Global email service instance
 _email_service: Optional[EmailService] = None

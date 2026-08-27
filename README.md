@@ -351,13 +351,39 @@ To use AWS SES for sending emails:
 }
 ```
 
+### Choosing a provider
+
+| provider | transport | when to use |
+|---|---|---|
+| `resend` | HTTPS POST to the Resend API | **Default choice.** The only one that works where outbound SMTP is blocked — which is the case on most VPS hosts, DigitalOcean included. Needs `pip install 'users[resend]'`. |
+| `ses` | HTTPS (boto3) | You already run on AWS. Also unaffected by SMTP blocks. |
+| `smtp` | SMTP over implicit TLS (port 465) | Local development, or a host you know permits outbound SMTP. |
+
+⚠️ **Check that outbound SMTP works before choosing `smtp`.** Many providers block ports
+25/465/587 by default and do not announce it; sends then fail with a connection timeout at
+request time, long after deployment. Test from the host itself:
+
+```bash
+nc -zv smtp.gmail.com 465     # times out if blocked
+```
+
+Whichever provider you pick, sending as your own domain requires **SPF and DKIM DNS
+records** for it. Without them mail is delivered to spam, which looks like success from the
+application's side.
+
 ### Environment Variables
 
 ```bash
 # Email Configuration
 EMAIL_ENABLED=True
+EMAIL_PROVIDER=resend
 EMAIL_SENDER_EMAIL=noreply@yourdomain.com
 EMAIL_SENDER_NAME=Your App Name
+
+# provider="resend"
+RESEND_API_KEY=re_xxxxxxxxxxxx
+
+# provider="ses"
 AWS_REGION=us-east-1
 
 # Password Reset
@@ -450,7 +476,8 @@ setup_users_package(
     secret_key="your-secret-key",
     database_url="postgresql://user:pass@localhost/db",
     email_config=EmailConfig(
-        provider="ses",
+        provider="resend",
+        api_key=os.getenv("RESEND_API_KEY"),
         sender_email="noreply@yourdomain.com",
         sender_name="Your App",
     ),

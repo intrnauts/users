@@ -1,4 +1,5 @@
 from typing import Optional
+import html
 import logging
 from dataclasses import dataclass
 import smtplib
@@ -376,6 +377,47 @@ Best regards,
 </body>
 </html>
 """
+
+        return await self._dispatch(recipient_email, subject, body_text, body_html)
+
+    async def send_email(
+        self,
+        recipient_email: str,
+        subject: str,
+        body_text: str,
+        body_html: Optional[str] = None,
+    ) -> bool:
+        """
+        Send an app-specific email through the configured provider (#17).
+
+        The two senders above are fixed messages. This is the seam for everything
+        else, so an app never needs a second email service of its own (dyner.z
+        had one; it went silently dead when SMTP was blocked).
+
+        Same contract as the fixed senders: disabled => no-op returning True,
+        unconfigured => logged and False, provider failure => False, never raises.
+
+        Args:
+            recipient_email: Email address to send to
+            subject: Subject line
+            body_text: Plain-text body
+            body_html: HTML body. If omitted, the plain text is escaped and used.
+
+        Returns:
+            True if email sent successfully, False otherwise
+        """
+        if not self.config.enabled:
+            # Recipient and subject only: an app body can carry a single-use link.
+            logger.info(f"Email service disabled - would send '{subject}' to {recipient_email}")
+            return True
+
+        readiness_error = self._readiness_error()
+        if readiness_error:
+            logger.error(readiness_error)
+            return False
+
+        if body_html is None:
+            body_html = f"<html><body><p>{html.escape(body_text).replace(chr(10), '<br>')}</p></body></html>"
 
         return await self._dispatch(recipient_email, subject, body_text, body_html)
 

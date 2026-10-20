@@ -25,7 +25,29 @@ class UserService:
         self.role_repo = role_repository
         self.permission_repo = permission_repository
 
-    async def create_user(self, user_data: UserCreate) -> UserResponse:
+    async def create_user(self, user_data: UserCreate, *, trusted: bool = False) -> UserResponse:
+        """Create a user.
+
+        Untrusted by default: status, is_superuser and roles are reset to
+        PENDING, False and [] so that a public endpoint passing a request body
+        straight through cannot create an active superuser. Pass trusted=True
+        only when those fields were set by server code (admin tooling, seed
+        scripts, or a register route that deliberately activates new users).
+        """
+        if not trusted:
+            if (user_data.status != UserStatus.PENDING or user_data.is_superuser
+                    or user_data.roles):
+                logger.warning(
+                    "create_user() ignored status/is_superuser/roles for %s; "
+                    "pass trusted=True if server code set them",
+                    user_data.email
+                )
+            user_data = user_data.model_copy(update={
+                "status": UserStatus.PENDING,
+                "is_superuser": False,
+                "roles": []
+            })
+
         # Check if user already exists
         existing_user = await self.user_repo.get_user_by_email(user_data.email)
         if existing_user:

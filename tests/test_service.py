@@ -238,8 +238,8 @@ class TestUserService:
             status=UserStatus.PENDING
         )
 
-        await user_service.create_user(active_user)
-        await user_service.create_user(pending_user)
+        await user_service.create_user(active_user, trusted=True)
+        await user_service.create_user(pending_user, trusted=True)
 
         # Filter by status
         active_users = await user_service.list_users(filters={"status": UserStatus.ACTIVE})

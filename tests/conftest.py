@@ -148,7 +148,7 @@ def create_test_user(user_service, auth_manager):
             password=password,
             **kwargs
         )
-        return await user_service.create_user(user_data)
+        return await user_service.create_user(user_data, trusted=True)
 
     return _create_user
 

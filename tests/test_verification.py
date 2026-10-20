@@ -133,7 +133,7 @@ class TestVerifyEmail:
             username="suspended",
             password="test_password_123",
             status=UserStatus.SUSPENDED
-        ))
+        ), trusted=True)
 
         verified = await user_service.verify_email(
             EmailVerificationConfirm(token=fake_email.last_verification_token)
@@ -227,7 +227,7 @@ class TestRequireVerifiedEmailOnLogin:
             username="unverified",
             password="test_password_123",
             status=UserStatus.ACTIVE
-        ))
+        ), trusted=True)
 
         with pytest.raises(HTTPException) as exc_info:
             await user_service.login(UserLogin(
@@ -298,7 +298,7 @@ class TestRequireVerifiedEmailOnLogin:
             username="legacy",
             password="test_password_123",
             status=UserStatus.ACTIVE
-        ))
+        ), trusted=True)
 
         token = await user_service.login(UserLogin(
             email="legacy@example.com",
@@ -412,6 +412,44 @@ class TestPrivilegedFieldsAreNotSelfServe:
 
         assert fields.isdisjoint({"status", "is_superuser", "is_verified", "roles"})
 
+    @pytest.mark.asyncio
+    async def test_create_user_is_untrusted_by_default(
+        self, user_service, user_repository, create_test_role, fake_email
+    ):
+        # A consumer's register route that passes a UserCreate body straight
+        # through.
+        await create_test_role(name="admin")
+        created = await user_service.create_user(UserCreate(
+            email="attacker@example.com",
+            password="test_password_123",
+            status=UserStatus.ACTIVE,
+            is_superuser=True,
+            roles=["admin"]
+        ))
+
+        stored = await user_repository.get_user_by_id(created.id)
+        assert stored.is_superuser is False
+        assert stored.status == UserStatus.PENDING
+        assert stored.roles == []
+
+    @pytest.mark.asyncio
+    async def test_trusted_create_user_keeps_privileged_fields(
+        self, user_service, user_repository, create_test_role, fake_email
+    ):
+        await create_test_role(name="admin")
+        created = await user_service.create_user(UserCreate(
+            email="admin@example.com",
+            password="test_password_123",
+            status=UserStatus.ACTIVE,
+            is_superuser=True,
+            roles=["admin"]
+        ), trusted=True)
+
+        stored = await user_repository.get_user_by_id(created.id)
+        assert stored.is_superuser is True
+        assert stored.status == UserStatus.ACTIVE
+        assert [role.name for role in stored.roles] == ["admin"]
+
 @pytest.mark.asyncio
 class TestEmailCaseNormalization:
     """Addresses are stored and matched in one canonical lowercase form.
@@ -465,7 +503,7 @@ class TestEmailCaseNormalization:
             username="loginuser",
             password="test_password_123",
             status=UserStatus.ACTIVE
-        ))
+        ), trusted=True)
 
         token = await user_service.login(UserLogin(
             email="LOGIN.USER@EXAMPLE.COM", password="test_password_123"

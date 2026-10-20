@@ -87,6 +87,33 @@ login_data = {
 # Returns: {"access_token": "...", "token_type": "bearer", "expires_in": 3600}
 ```
 
+### Writing your own register route
+
+> ⚠️ **A public endpoint must accept `UserRegister`, never `UserCreate`.**
+> `UserCreate` carries `status`, `is_superuser` and `roles`, so a route that
+> takes it from the request body lets a stranger create an active superuser.
+
+`UserService.create_user()` is untrusted by default: it resets `status`,
+`is_superuser` and `roles` to `pending`, `False` and `[]`, and logs a warning
+if any were set. Pass `trusted=True` only when your own code set them. For
+example, a register route that skips email verification:
+
+```python
+from users import UserRegister, UserStatus
+
+@router.post("/register", response_model=UserResponse)
+async def register(
+    user_data: UserRegister,
+    user_service: UserService = Depends(get_user_service)
+):
+    # Privileged fields come from to_user_create(), not the request.
+    active = user_data.to_user_create().model_copy(update={"status": UserStatus.ACTIVE})
+    return await user_service.create_user(active, trusted=True)
+```
+
+`SQLAlchemyUserRepository.create_user()` performs no such check. It stores what
+it is given, so call it only with trusted data.
+
 ## Advanced Usage
 
 ### Role-Based Access Control
@@ -174,7 +201,7 @@ for role_name, role_data in roles_data.items():
 ### Manual Service Usage
 
 ```python
-from users import UserService, UserCreate
+from users import UserService, UserCreate, UserStatus
 
 # Create user service
 user_service = UserService(user_repository)
@@ -183,10 +210,12 @@ user_service = UserService(user_repository)
 user_data = UserCreate(
     email="admin@example.com",
     password="admin_password_123",
+    status=UserStatus.ACTIVE,
     is_superuser=True,
     roles=["admin"]
 )
-user = await user_service.create_user(user_data)
+# trusted=True because server code, not a request body, set those fields.
+user = await user_service.create_user(user_data, trusted=True)
 
 # Authenticate user
 from users.models import UserLogin
@@ -651,7 +680,15 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.3.0 (Latest)
+### v0.4.0 (Latest)
+- 🛡️ **Breaking:** `UserService.create_user()` is now untrusted by default. It
+  resets `status`, `is_superuser` and `roles` unless called with `trusted=True`,
+  so a register route that passes a `UserCreate` body through can no longer
+  create an active superuser. Seed scripts, admin tooling and register routes
+  that activate users on purpose must pass `trusted=True`, or new users come out
+  `pending` with no roles. See [Writing your own register route](#writing-your-own-register-route)
+
+### v0.3.0
 - 📧 Email addresses are now normalized to trimmed lowercase on both storage and
   lookup, so case can no longer split one mailbox across two accounts or make a
   password reset silently miss. Exported as `normalize_email()`.

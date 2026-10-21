@@ -104,7 +104,7 @@ class TestToken:
         assert token.expires_in == 3600
 
     def test_token_default_type(self):
-        token = Token(access_token="test_token")
+        token = Token(access_token="test_token", expires_in=3600)
 
         assert token.token_type == "bearer"
 

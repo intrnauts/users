@@ -212,6 +212,10 @@ class UserFactory:
             "first_name": "Test",
             "last_name": "User"
         }
+        # Distinct emails should give distinct users, so derive the username
+        # from the email unless one is passed
+        if "email" in overrides and "username" not in overrides:
+            defaults["username"] = overrides["email"].split("@")[0]
         defaults.update(overrides)
         return UserCreate(**defaults)
 

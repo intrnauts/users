@@ -86,8 +86,10 @@ class TestUserService:
         assert authenticated_user is None
 
     async def test_login_success(self, user_service, sample_user_data):
-        # Create user
-        await user_service.create_user(sample_user_data)
+        # Create an active user; an untrusted create leaves it pending and
+        # unverified, which login() rightly rejects (see test_verification.py)
+        active_user = sample_user_data.model_copy(update={"status": UserStatus.ACTIVE})
+        await user_service.create_user(active_user, trusted=True)
 
         # Login
         login_data = UserLogin(

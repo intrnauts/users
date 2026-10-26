@@ -152,6 +152,17 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         if not db_user:
             return False
 
+        # The token tables reference users without ON DELETE CASCADE, so their
+        # rows must go first or the database rejects the delete. Done here, in
+        # the same transaction, rather than through delete_user_*_tokens(),
+        # which each commit on their own.
+        self.db.query(EmailVerificationToken).filter(
+            EmailVerificationToken.user_id == user_id
+        ).delete(synchronize_session=False)
+        self.db.query(PasswordResetToken).filter(
+            PasswordResetToken.user_id == user_id
+        ).delete(synchronize_session=False)
+
         self.db.delete(db_user)
         self.db.commit()
         return True

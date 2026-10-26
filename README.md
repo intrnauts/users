@@ -688,6 +688,10 @@ MIT License - see LICENSE file for details.
   account still needs approval. Before this, an unverified user who reset their
   password had to verify separately before `require_verified_email` let them
   log in (#24)
+- 🐛 Fixed `delete_user()` failing with a foreign-key error for any user holding
+  an email verification or password reset token, which in practice meant every
+  self-registered user. It now deletes those tokens first, in the same
+  transaction. No schema change, so no migration is needed (#21)
 
 ### v0.4.0 (Latest)
 - 🛡️ **Breaking:** `UserService.create_user()` is now untrusted by default. It

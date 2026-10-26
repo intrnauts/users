@@ -367,6 +367,82 @@ class TestPasswordResetHardening:
         assert fake_email.reset_emails == []
 
 @pytest.mark.asyncio
+class TestPasswordResetVerifiesEmail:
+    """A completed reset proves control of the inbox, as verification does (#24)."""
+
+    async def _reset(self, user_service, fake_email, email):
+        await user_service.request_password_reset(PasswordResetRequest(email=email))
+        await user_service.confirm_password_reset(PasswordResetConfirm(
+            token=fake_email.last_reset_token, new_password="brand_new_password_456"
+        ))
+
+    async def test_marks_an_unverified_user_verified(self, user_service, register_data, fake_email):
+        user = await user_service.create_user(register_data)
+        assert user.is_verified is False
+
+        await self._reset(user_service, fake_email, register_data.email)
+
+        assert (await user_service.get_user_by_id(user.id)).is_verified is True
+
+    async def test_leaves_a_pending_user_pending(self, user_service, register_data, fake_email):
+        # auto_activate_on_verify is on by default; a reset must still not
+        # promote the account, or it would skip any admin-approval step.
+        user = await user_service.create_user(register_data)
+        assert user.status == UserStatus.PENDING
+
+        await self._reset(user_service, fake_email, register_data.email)
+
+        assert (await user_service.get_user_by_id(user.id)).status == UserStatus.PENDING
+
+    async def test_leaves_an_inactive_user_inactive(self, user_service, fake_email):
+        user = await user_service.create_user(UserCreate(
+            email="off@example.com", username="off",
+            password="test_password_123", status=UserStatus.INACTIVE
+        ), trusted=True)
+
+        await self._reset(user_service, fake_email, "off@example.com")
+
+        stored = await user_service.get_user_by_id(user.id)
+        assert stored.is_verified is True
+        assert stored.status == UserStatus.INACTIVE
+
+    async def test_outstanding_verification_link_stops_working(self, user_service, register_data, fake_email):
+        await user_service.create_user(register_data)
+        old_link = fake_email.last_verification_token
+
+        await self._reset(user_service, fake_email, register_data.email)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await user_service.verify_email(EmailVerificationConfirm(token=old_link))
+        assert exc_info.value.status_code == 400
+
+    async def test_login_needs_no_second_email(self, user_service, register_data, fake_email):
+        # The chakri#65 case: verification required, account active but never
+        # verified. One reset email should be enough to get back in.
+        configure_verification(VerificationConfig(require_verified_email=True))
+        await user_service.create_user(UserCreate(
+            email="old@example.com", username="old",
+            password="test_password_123", status=UserStatus.ACTIVE
+        ), trusted=True)
+        sent_before = len(fake_email.verification_emails)
+
+        await self._reset(user_service, fake_email, "old@example.com")
+
+        token = await user_service.login(UserLogin(
+            email="old@example.com", password="brand_new_password_456"
+        ))
+        assert token.access_token
+        assert len(fake_email.verification_emails) == sent_before
+
+    async def test_unknown_email_is_still_a_no_op(self, user_service, fake_email):
+        result = await user_service.request_password_reset(
+            PasswordResetRequest(email="nobody@example.com")
+        )
+
+        assert result is True
+        assert fake_email.reset_emails == []
+
+@pytest.mark.asyncio
 class TestChangePasswordPersists:
     async def test_new_password_is_actually_saved(self, user_service, register_data, fake_email):
         """Regression: change_password used to route through UserUpdate, which

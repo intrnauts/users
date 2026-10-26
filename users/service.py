@@ -465,6 +465,14 @@ class UserService:
         # into its session, so non-SQLAlchemy repositories work too.
         await self.user_repo.set_password(user.id, new_hashed_password)
 
+        # The reset link reached only this inbox, which is the same proof a
+        # verification link gives (#24). Mark the address verified, but leave
+        # status alone: unlike verify_email(), a reset must never get around
+        # an admin-approval step.
+        if not user.is_verified:
+            await self.user_repo.set_verified(user.id, is_verified=True)
+            await self.user_repo.delete_user_verification_tokens(user.id)
+
         # Burn the token, then drop any others so a link cannot be replayed.
         await self.user_repo.mark_token_as_used(token_hash)
         await self.user_repo.delete_user_reset_tokens(user.id)

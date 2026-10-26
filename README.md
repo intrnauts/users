@@ -680,6 +680,15 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
+### Unreleased
+- ✉️ **Behaviour change:** completing a password reset now marks the address
+  verified, since the reset link proves control of the inbox just as a
+  verification link does. Any outstanding verification links are invalidated.
+  `status` is left alone, even with `auto_activate_on_verify`, so a `pending`
+  account still needs approval. Before this, an unverified user who reset their
+  password had to verify separately before `require_verified_email` let them
+  log in (#24)
+
 ### v0.4.0 (Latest)
 - 🛡️ **Breaking:** `UserService.create_user()` is now untrusted by default. It
   resets `status`, `is_superuser` and `roles` unless called with `trusted=True`,

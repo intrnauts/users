@@ -680,7 +680,7 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### Unreleased
+### v0.4.1 (Latest)
 - ✉️ **Behaviour change:** completing a password reset now marks the address
   verified, since the reset link proves control of the inbox just as a
   verification link does. Any outstanding verification links are invalidated.
@@ -692,8 +692,12 @@ MIT License - see LICENSE file for details.
   an email verification or password reset token, which in practice meant every
   self-registered user. It now deletes those tokens first, in the same
   transaction. No schema change, so no migration is needed (#21)
+- 📌 Depend on `sqlalchemy[asyncio]` rather than `sqlalchemy`. SQLAlchemy 2.1
+  no longer installs `greenlet`, so `import users` failed on any fresh install
+  without it. Environments built earlier usually still have it, and break only
+  on their next clean build (#26)
 
-### v0.4.0 (Latest)
+### v0.4.0
 - 🛡️ **Breaking:** `UserService.create_user()` is now untrusted by default. It
   resets `status`, `is_superuser` and `roles` unless called with `trusted=True`,
   so a register route that passes a `UserCreate` body through can no longer

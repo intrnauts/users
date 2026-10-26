@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "users"
-version = "0.4.0"
+version = "0.4.1"
 description = "A flexible user management package for FastAPI backends"
 authors = [{name = "Your Name", email = "your.email@example.com"}]
 license = {text = "MIT"}
@@ -21,7 +21,9 @@ dependencies = [
     # then fails, so bcrypt must stay below 4.1 until passlib is replaced.
     "bcrypt<4.1",
     "python-multipart>=0.0.5",
-    "sqlalchemy>=2.0.0",
+    # SQLAlchemy 2.1 stopped installing greenlet, which sqlalchemy.ext.asyncio
+    # needs; users/database.py imports it on load, so ask for it (#26).
+    "sqlalchemy[asyncio]>=2.0.0",
     "alembic>=1.8.0"
 ]
 classifiers = [

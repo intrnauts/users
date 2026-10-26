@@ -29,12 +29,16 @@ def _sqlite_engine(database_url, schema_path):
     The models declare schema='users' for PostgreSQL. SQLite has no schemas, but
     an ATTACHed database serves the same qualified-name role, so every pooled
     connection attaches one under the name `users`.
+
+    SQLite also ignores foreign keys unless told otherwise, which hid #21: a
+    delete that PostgreSQL rejects went through here. Enforce them.
     """
     engine = create_engine(database_url, echo=False)
 
     @event.listens_for(engine, "connect")
     def _attach_users_schema(dbapi_connection, _connection_record):
         dbapi_connection.execute(f"ATTACH DATABASE '{schema_path}' AS users")
+        dbapi_connection.execute("PRAGMA foreign_keys = ON")
 
     return engine
 

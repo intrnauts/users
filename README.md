@@ -680,6 +680,12 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
+### Unreleased
+- 🐛 Fixed `delete_user()` failing with a foreign-key error for any user holding
+  an email verification or password reset token, which in practice meant every
+  self-registered user. It now deletes those tokens first, in the same
+  transaction. No schema change, so no migration is needed (#21)
+
 ### v0.4.0 (Latest)
 - 🛡️ **Breaking:** `UserService.create_user()` is now untrusted by default. It
   resets `status`, `is_superuser` and `roles` unless called with `trusted=True`,

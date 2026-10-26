@@ -564,3 +564,32 @@ class TestEmailCaseNormalization:
         created = await user_repository.create_user(raw)
 
         assert created.email == "bypass@example.com"
+
+@pytest.mark.asyncio
+class TestDeleteUserWithTokens:
+    """The token tables reference users with no ON DELETE CASCADE (#21)."""
+
+    async def test_deletes_a_user_holding_both_kinds_of_token(self, user_service, register_data, fake_email, db_session):
+        user = await user_service.create_user(register_data)
+        await user_service.request_password_reset(
+            PasswordResetRequest(email=register_data.email)
+        )
+        assert db_session.query(EmailVerificationToken).count() == 1
+        assert db_session.query(PasswordResetToken).count() == 1
+
+        assert await user_service.delete_user(user.id) is True
+
+        assert await user_service.get_user_by_id(user.id) is None
+        assert db_session.query(EmailVerificationToken).count() == 0
+        assert db_session.query(PasswordResetToken).count() == 0
+
+    async def test_leaves_other_users_tokens_alone(self, user_service, register_data, fake_email, db_session):
+        doomed = await user_service.create_user(register_data)
+        kept = await user_service.create_user(UserCreate(
+            email="kept@example.com", username="kept", password="test_password_123"
+        ))
+
+        await user_service.delete_user(doomed.id)
+
+        remaining = db_session.query(EmailVerificationToken).all()
+        assert [token.user_id for token in remaining] == [kept.id]

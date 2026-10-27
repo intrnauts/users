@@ -133,8 +133,6 @@ class UserService:
         if not auth_manager.verify_password(login_data.password, user.hashed_password):
             return None
 
-        # Update last login
-        user.last_login = datetime.utcnow()
         return user
 
     async def login(self, login_data: UserLogin) -> Token:
@@ -174,6 +172,10 @@ class UserService:
 
         if config.require_verified_email and not user.is_verified:
             raise verification_error
+
+        # Only a login that issues a token counts, not a correct password on an
+        # account rejected above
+        await self.user_repo.touch_last_login(user.id)
 
         # Get user permissions
         permissions = await self.user_repo.get_user_permissions(user.id)

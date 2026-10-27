@@ -49,6 +49,10 @@ class UserRepositoryInterface(ABC):
     async def set_verified(self, user_id: int, is_verified: bool, status: str = None) -> Optional[User]:
         pass
 
+    @abstractmethod
+    async def touch_last_login(self, user_id: int) -> bool:
+        pass
+
     # Tokens are passed and stored as digests, never as the value emailed to the
     # user. Callers hash with users.verification.hash_token first.
 
@@ -231,6 +235,20 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         self.db.commit()
         self.db.refresh(db_user)
         return db_user
+
+    async def touch_last_login(self, user_id: int) -> bool:
+        """Record that a user has just logged in, and commit it.
+
+        Setting the attribute and leaving the commit to the caller loses it:
+        the FastAPI db dependency closes the session without committing.
+        """
+        db_user = await self.get_user_by_id(user_id)
+        if not db_user:
+            return False
+
+        db_user.last_login = datetime.utcnow()
+        self.db.commit()
+        return True
 
     async def create_password_reset_token(self, user_id: int, token_hash: str, expires_at: datetime) -> PasswordResetToken:
         """Create a new password reset token from its digest"""

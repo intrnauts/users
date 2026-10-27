@@ -1,6 +1,6 @@
 import pytest
 from fastapi import HTTPException
-from users.models import UserCreate, UserUpdate, UserLogin, UserStatus
+from users.models import User, UserCreate, UserUpdate, UserLogin, UserStatus
 
 @pytest.mark.asyncio
 class TestUserService:
@@ -117,6 +117,41 @@ class TestUserService:
 
         assert exc_info.value.status_code == 401
         assert "Incorrect email or password" in str(exc_info.value.detail)
+
+    async def test_login_persists_last_login(self, user_service, sample_user_data, test_db):
+        active_user = sample_user_data.model_copy(update={"status": UserStatus.ACTIVE})
+        await user_service.create_user(active_user, trusted=True)
+
+        await user_service.login(UserLogin(
+            email=sample_user_data.email,
+            password=sample_user_data.password
+        ))
+
+        # Read back from a fresh session, so an uncommitted change can't pass
+        fresh = test_db()
+        try:
+            user = fresh.query(User).filter(User.email == sample_user_data.email).one()
+            assert user.last_login is not None
+        finally:
+            fresh.close()
+
+    async def test_rejected_login_does_not_set_last_login(self, user_service, sample_user_data, test_db):
+        # An untrusted create leaves the account pending, so login() refuses it
+        # even though the password is correct
+        await user_service.create_user(sample_user_data)
+
+        with pytest.raises(HTTPException):
+            await user_service.login(UserLogin(
+                email=sample_user_data.email,
+                password=sample_user_data.password
+            ))
+
+        fresh = test_db()
+        try:
+            user = fresh.query(User).filter(User.email == sample_user_data.email).one()
+            assert user.last_login is None
+        finally:
+            fresh.close()
 
     async def test_get_user_by_id(self, user_service, sample_user_data):
         # Create user

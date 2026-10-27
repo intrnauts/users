@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from .models import (
-    User, Role, PermissionModel, PasswordResetToken, EmailVerificationToken,
+    User, Role, PermissionModel, PasswordResetToken, EmailVerificationToken, EmailChangeToken,
     UserCreate, UserUpdate, normalize_email
 )
 
@@ -88,6 +88,25 @@ class UserRepositoryInterface(ABC):
     async def delete_user_verification_tokens(self, user_id: int) -> bool:
         pass
 
+    @abstractmethod
+    async def create_email_change_token(
+        self, user_id: int, token_hash: str, purpose: str,
+        old_email: str, new_email: str, expires_at: datetime
+    ) -> EmailChangeToken:
+        pass
+
+    @abstractmethod
+    async def get_email_change_token(self, token_hash: str) -> Optional[EmailChangeToken]:
+        pass
+
+    @abstractmethod
+    async def mark_email_change_token_as_used(self, token_hash: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def delete_user_email_change_tokens(self, user_id: int) -> bool:
+        pass
+
 class SQLAlchemyUserRepository(UserRepositoryInterface):
     def __init__(self, db_session: Session):
         self.db = db_session
@@ -165,6 +184,9 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         ).delete(synchronize_session=False)
         self.db.query(PasswordResetToken).filter(
             PasswordResetToken.user_id == user_id
+        ).delete(synchronize_session=False)
+        self.db.query(EmailChangeToken).filter(
+            EmailChangeToken.user_id == user_id
         ).delete(synchronize_session=False)
 
         self.db.delete(db_user)
@@ -324,6 +346,54 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         """Delete all email verification tokens for a user"""
         tokens = self.db.query(EmailVerificationToken).filter(
             EmailVerificationToken.user_id == user_id
+        ).all()
+
+        for token in tokens:
+            self.db.delete(token)
+
+        self.db.commit()
+        return True
+
+    async def create_email_change_token(
+        self, user_id: int, token_hash: str, purpose: str,
+        old_email: str, new_email: str, expires_at: datetime
+    ) -> EmailChangeToken:
+        """Create an email-change token from its digest"""
+        change_token = EmailChangeToken(
+            user_id=user_id,
+            token=token_hash,
+            purpose=purpose,
+            # Normalized here too, so a revert restores exactly what was stored
+            old_email=normalize_email(old_email),
+            new_email=normalize_email(new_email),
+            expires_at=expires_at,
+            used=False
+        )
+        self.db.add(change_token)
+        self.db.commit()
+        self.db.refresh(change_token)
+        return change_token
+
+    async def get_email_change_token(self, token_hash: str) -> Optional[EmailChangeToken]:
+        """Get an email-change token by its digest"""
+        return self.db.query(EmailChangeToken).filter(
+            EmailChangeToken.token == token_hash
+        ).first()
+
+    async def mark_email_change_token_as_used(self, token_hash: str) -> bool:
+        """Mark an email-change token as used"""
+        change_token = await self.get_email_change_token(token_hash)
+        if not change_token:
+            return False
+
+        change_token.used = True
+        self.db.commit()
+        return True
+
+    async def delete_user_email_change_tokens(self, user_id: int) -> bool:
+        """Delete all email-change tokens for a user"""
+        tokens = self.db.query(EmailChangeToken).filter(
+            EmailChangeToken.user_id == user_id
         ).all()
 
         for token in tokens:

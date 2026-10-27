@@ -3,6 +3,7 @@ __version__ = "0.4.3"
 # Core models and schemas
 from .models import (
     User, Role, PermissionModel, PasswordResetToken, EmailVerificationToken,
+    EmailChangeToken, EmailChangeTokenPurpose,
     UserCreate, UserUpdate, UserSelfUpdate, UserRegister, UserResponse, UserLogin, Token,
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
     UserStatus, Permission, configure_base, normalize_email,
@@ -243,6 +244,7 @@ def create_default_roles():
 __all__ = [
     # Core models
     "User", "Role", "PermissionModel", "PasswordResetToken", "EmailVerificationToken",
+    "EmailChangeToken", "EmailChangeTokenPurpose",
     "UserCreate", "UserUpdate", "UserSelfUpdate", "UserRegister", "UserResponse", "UserLogin", "Token",
     "RoleCreate", "RoleResponse", "PermissionCreate", "PermissionResponse",
     "UserStatus", "Permission", "configure_base", "normalize_email",

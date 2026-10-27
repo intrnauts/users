@@ -39,6 +39,14 @@ class VerificationConfig:
     verification_token_ttl_hours: int = 24
     password_reset_token_ttl_hours: int = 1
 
+    # Let users change their own email address (#41). Off by default: the
+    # change needs the current password, a confirmation from the new address,
+    # and leaves the old address a way to cancel or revert it.
+    allow_email_change: bool = False
+
+    # How long the old address can undo an applied email change.
+    email_change_revert_ttl_days: int = 7
+
     # URL template containing a {token} placeholder, e.g.
     # "https://app.example.com/verify-email?token={token}". When None the email
     # carries the bare token.

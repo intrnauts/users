@@ -421,6 +421,69 @@ Best regards,
 
         return await self._dispatch(recipient_email, subject, body_text, body_html)
 
+    # Email change (#41). These go through send_email(), so disabled mode logs
+    # the recipient and subject only, never the link.
+
+    async def send_email_change_confirmation(
+        self, recipient_email: str, confirm_link: str, ttl_hours: int
+    ) -> bool:
+        """Ask the new address to confirm an email change."""
+        body_text = f"""
+Hello,
+
+Someone asked to change the email address on their account to this one. To confirm the change, use the following link:
+
+{confirm_link}
+
+This link will expire in {ttl_hours} hours. Until it's used, the account keeps its current address.
+
+If you did not ask for this, please ignore this email.
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Confirm Your New Email Address", body_text)
+
+    async def send_email_change_requested_notice(
+        self, recipient_email: str, new_email: str, cancel_link: str
+    ) -> bool:
+        """Tell the current address a change was requested, with a way to stop it."""
+        body_text = f"""
+Hello,
+
+Someone asked to change the email address on your account from this address to {new_email}. The change happens only once the new address is confirmed.
+
+If this wasn't you, cancel the change with the following link. Your password will also be reset, because the request needed it:
+
+{cancel_link}
+
+If you made this request, you don't need to do anything.
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Email Change Requested", body_text)
+
+    async def send_email_change_completed_notice(
+        self, recipient_email: str, new_email: str, revert_link: str, ttl_days: int
+    ) -> bool:
+        """Tell the old address the change happened, with a way to undo it."""
+        body_text = f"""
+Hello,
+
+The email address on your account was changed from this address to {new_email}.
+
+If this wasn't you, use the following link within {ttl_days} days to put this address back. Your password will also be reset, and the reset link will come to this address:
+
+{revert_link}
+
+If you made this change, you don't need to do anything.
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Your Email Address Was Changed", body_text)
+
 # Global email service instance
 _email_service: Optional[EmailService] = None
 

@@ -307,3 +307,12 @@ class EmailVerificationConfirm(BaseModel):
 
 class EmailVerificationResend(BaseModel):
     email: NormalizedEmail
+
+# Email change schemas (#41)
+class EmailChangeRequest(BaseModel):
+    current_password: str
+    new_email: NormalizedEmail
+
+class EmailChangeTokenAction(BaseModel):
+    """A token from an email-change link: confirm, cancel or revert."""
+    token: str

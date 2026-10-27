@@ -5,7 +5,8 @@ from fastapi import HTTPException, status
 from .models import (
     User, UserCreate, UserUpdate, UserLogin, Token, UserResponse, UserStatus,
     PasswordResetRequest, PasswordResetConfirm,
-    EmailVerificationConfirm, EmailVerificationResend
+    EmailVerificationConfirm, EmailVerificationResend,
+    EmailChangeRequest, EmailChangeTokenAction, EmailChangeTokenPurpose
 )
 from .repository import UserRepositoryInterface, RoleRepository, PermissionRepository
 from .auth import get_auth_manager
@@ -480,6 +481,269 @@ class UserService:
         await self.user_repo.delete_user_reset_tokens(user.id)
 
         return True
+
+    # Email change (#41). A request sends a confirm link to the new address and
+    # a cancel link to the old one. Confirming applies the change and sends the
+    # old address a revert link. Cancel and revert both force a password reset:
+    # a request needs the current password, so a change the owner didn't make
+    # means someone else has it.
+
+    _PENDING_EMAIL_CHANGE = [
+        EmailChangeTokenPurpose.CONFIRM.value, EmailChangeTokenPurpose.CANCEL.value
+    ]
+
+    async def request_email_change(self, user_id: int, request_data: EmailChangeRequest) -> bool:
+        """Start an email change for a logged-in user.
+
+        Nothing changes on the account yet. Any earlier pending request is
+        replaced, but a live revert link from an earlier change is kept, so a
+        second change can't take away the owner's way back.
+
+        Raises:
+            HTTPException: 403 if email change is off, 400 if the password is
+                wrong or the address is the current one or already taken.
+        """
+        config = get_verification_config()
+        if not config.allow_email_change:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Email change is not enabled"
+            )
+
+        user = await self.user_repo.get_user_by_id(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        auth_manager = get_auth_manager()
+        if not auth_manager.verify_password(request_data.current_password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password is incorrect"
+            )
+
+        new_email = request_data.new_email
+        if new_email == user.email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="That is already your email address"
+            )
+        if await self.user_repo.get_user_by_email(new_email):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+
+        expires_at = datetime.utcnow() + timedelta(hours=config.verification_token_ttl_hours)
+        await self.user_repo.delete_user_email_change_tokens(
+            user.id, purposes=self._PENDING_EMAIL_CHANGE
+        )
+        confirm_token = await self._issue_email_change_token(
+            user.id, EmailChangeTokenPurpose.CONFIRM, user.email, new_email, expires_at
+        )
+        cancel_token = await self._issue_email_change_token(
+            user.id, EmailChangeTokenPurpose.CANCEL, user.email, new_email, expires_at
+        )
+
+        try:
+            email_service = get_email_service()
+            await email_service.send_email_change_confirmation(
+                recipient_email=new_email,
+                confirm_link=self._email_change_link("confirm", confirm_token),
+                ttl_hours=config.verification_token_ttl_hours
+            )
+            await email_service.send_email_change_requested_notice(
+                recipient_email=user.email,
+                new_email=new_email,
+                cancel_link=self._email_change_link("cancel", cancel_token)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send email change emails: {e}")
+
+        return True
+
+    async def confirm_email_change(self, action_data: EmailChangeTokenAction) -> UserResponse:
+        """Apply a pending email change, using the token sent to the new address.
+
+        Raises:
+            HTTPException: if the token is not a live confirm token, the account
+                has changed address since, or the new address was taken meanwhile.
+        """
+        token_hash, change = await self._redeem_email_change_token(
+            action_data.token, EmailChangeTokenPurpose.CONFIRM
+        )
+
+        user = await self.user_repo.get_user_by_id(change.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        # A change requested from an address the account no longer has is stale.
+        if user.email != change.old_email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired email change token"
+            )
+        # Checked again here: someone may have registered the address since.
+        if await self.user_repo.get_user_by_email(change.new_email):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+
+        await self.user_repo.update_user(user.id, UserUpdate(email=change.new_email))
+        # The link reached the new inbox, which proves control of it.
+        updated_user = await self.user_repo.set_verified(user.id, is_verified=True)
+
+        await self.user_repo.mark_email_change_token_as_used(token_hash)
+        await self.user_repo.delete_user_email_change_tokens(
+            user.id, purposes=self._PENDING_EMAIL_CHANGE
+        )
+        await self.user_repo.delete_user_reset_tokens(user.id)
+        await self.user_repo.delete_user_verification_tokens(user.id)
+
+        config = get_verification_config()
+        revert_token = await self._issue_email_change_token(
+            user.id, EmailChangeTokenPurpose.REVERT, change.old_email, change.new_email,
+            datetime.utcnow() + timedelta(days=config.email_change_revert_ttl_days)
+        )
+        try:
+            email_service = get_email_service()
+            await email_service.send_email_change_completed_notice(
+                recipient_email=change.old_email,
+                new_email=change.new_email,
+                revert_link=self._email_change_link("revert", revert_token),
+                ttl_days=config.email_change_revert_ttl_days
+            )
+        except Exception as e:
+            logger.error(f"Failed to send email change notice: {e}")
+
+        return self._user_to_response(updated_user)
+
+    async def cancel_email_change(
+        self, action_data: EmailChangeTokenAction, reset_url_template: str = None
+    ) -> bool:
+        """Stop a pending email change, using the token sent to the old address.
+
+        Also forces a password reset, sent to the account's address.
+        """
+        token_hash, change = await self._redeem_email_change_token(
+            action_data.token, EmailChangeTokenPurpose.CANCEL
+        )
+        user = await self.user_repo.get_user_by_id(change.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        await self.user_repo.mark_email_change_token_as_used(token_hash)
+        await self.user_repo.delete_user_email_change_tokens(
+            user.id, purposes=self._PENDING_EMAIL_CHANGE
+        )
+        await self._force_password_reset(user.id, user.email, reset_url_template)
+        return True
+
+    async def revert_email_change(
+        self, action_data: EmailChangeTokenAction, reset_url_template: str = None
+    ) -> bool:
+        """Put back the address an email change replaced, using the token sent to it.
+
+        Invalidates every other outstanding token for the account and forces a
+        password reset, sent to the restored address.
+
+        Raises:
+            HTTPException: 409 if another account has taken the old address since.
+        """
+        token_hash, change = await self._redeem_email_change_token(
+            action_data.token, EmailChangeTokenPurpose.REVERT
+        )
+        user = await self.user_repo.get_user_by_id(change.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        if user.email != change.old_email:
+            holder = await self.user_repo.get_user_by_email(change.old_email)
+            if holder and holder.id != user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This address now belongs to another account. Contact an administrator."
+                )
+            await self.user_repo.update_user(user.id, UserUpdate(email=change.old_email))
+        # The link reached the old inbox, which proves control of it.
+        await self.user_repo.set_verified(user.id, is_verified=True)
+
+        await self.user_repo.mark_email_change_token_as_used(token_hash)
+        await self.user_repo.delete_user_email_change_tokens(user.id)
+        await self.user_repo.delete_user_verification_tokens(user.id)
+        await self._force_password_reset(user.id, change.old_email, reset_url_template)
+        return True
+
+    async def _issue_email_change_token(
+        self, user_id: int, purpose: EmailChangeTokenPurpose,
+        old_email: str, new_email: str, expires_at: datetime
+    ) -> str:
+        """Store the digest of a new email-change token and return the raw token."""
+        raw_token = generate_token()
+        await self.user_repo.create_email_change_token(
+            user_id=user_id,
+            token_hash=hash_token(raw_token),
+            purpose=purpose.value,
+            old_email=old_email,
+            new_email=new_email,
+            expires_at=expires_at
+        )
+        return raw_token
+
+    async def _redeem_email_change_token(self, token: str, purpose: EmailChangeTokenPurpose):
+        """Look up a live email-change token of the given purpose.
+
+        A token of another purpose gets the same error as an unknown one, so a
+        cancel link can't be used to confirm, and the error says nothing more.
+        """
+        token_hash = hash_token(token)
+        change = await self.user_repo.get_email_change_token(token_hash)
+
+        if not change or change.purpose != purpose.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired email change token"
+            )
+        if change.used:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email change token has already been used"
+            )
+        if datetime.utcnow() > change.expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email change token has expired"
+            )
+        return token_hash, change
+
+    async def _force_password_reset(self, user_id: int, email: str, reset_url_template: str = None) -> None:
+        """Make the current password stop working, then send a reset link.
+
+        The password is replaced with the hash of a random value nobody knows.
+        Access tokens already issued keep working until they expire (#7).
+        """
+        auth_manager = get_auth_manager()
+        await self.user_repo.set_password(user_id, auth_manager.hash_password(generate_token()))
+        await self.request_password_reset(
+            PasswordResetRequest(email=email), reset_url_template=reset_url_template
+        )
+
+    def _email_change_link(self, action: str, token: str) -> str:
+        template = get_verification_config().email_change_url_template
+        if template is None:
+            return token
+        return template.format(action=action, token=token)
 
     def _user_to_response(self, user: User) -> UserResponse:
         role_names = [role.name for role in user.roles] if user.roles else []

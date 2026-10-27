@@ -4,7 +4,8 @@ from .models import (
     UserCreate, UserUpdate, UserSelfUpdate, UserRegister, UserResponse, UserLogin, Token,
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
     PasswordResetRequest, PasswordResetConfirm, PasswordChange,
-    EmailVerificationConfirm, EmailVerificationResend
+    EmailVerificationConfirm, EmailVerificationResend,
+    EmailChangeRequest, EmailChangeTokenAction
 )
 from .service import UserService, RoleService, PermissionService
 from .dependencies import (
@@ -59,14 +60,14 @@ def create_user_router(
             Accepts UserSelfUpdate, not UserUpdate: a user must not be able to
             set their own status, roles or is_superuser here.
 
-            Email is refused rather than ignored: changing it here skips the
-            password check and leaves is_verified set (#42). A guarded
-            email-change flow is tracked in #41.
+            Email is refused rather than ignored: changing it here would skip
+            the password check and the confirmation by the new address (#42).
+            POST /me/email is the guarded way (#41).
             """
             if "email" in user_data.model_fields_set:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Email can't be changed through this endpoint"
+                    detail="Email can't be changed through this endpoint. Use POST /me/email"
                 )
             return await user_service.update_user(
                 current_user.id, UserUpdate(**user_data.model_dump(exclude_unset=True))
@@ -88,6 +89,60 @@ def create_user_router(
                     detail="Failed to change password"
                 )
             return {"message": "Password changed successfully"}
+
+        @router.post("/me/email")
+        async def request_email_change(
+            request_data: EmailChangeRequest,
+            current_user = Depends(get_current_active_user),
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Start an email change (requires current password).
+
+            Sends a confirm link to the new address and a cancel link to the
+            current one. The account keeps its address until the change is
+            confirmed. Refused with 403 unless VerificationConfig.allow_email_change.
+            """
+            await user_service.request_email_change(current_user.id, request_data)
+            return {"message": "A confirmation link has been sent to the new address"}
+
+        @router.post("/me/email/confirm", response_model=UserResponse)
+        async def confirm_email_change(
+            action_data: EmailChangeTokenAction,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Apply an email change using the token sent to the new address.
+
+            No login needed: the token is the proof, as with /verify-email.
+            """
+            return await user_service.confirm_email_change(action_data)
+
+        @router.post("/email/cancel")
+        async def cancel_email_change(
+            action_data: EmailChangeTokenAction,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Stop a pending email change using the token sent to the current address.
+
+            No login needed, since the owner may be locked out. Forces a password reset.
+            """
+            await user_service.cancel_email_change(
+                action_data, reset_url_template=password_reset_url_template
+            )
+            return {"message": "The email change was cancelled. A password reset link has been sent"}
+
+        @router.post("/email/revert")
+        async def revert_email_change(
+            action_data: EmailChangeTokenAction,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Put back the previous address using the token sent to it.
+
+            No login needed, since the owner may be locked out. Forces a password reset.
+            """
+            await user_service.revert_email_change(
+                action_data, reset_url_template=password_reset_url_template
+            )
+            return {"message": "Your previous email address was restored. A password reset link has been sent"}
 
         @router.post("/verify-email", response_model=UserResponse)
         async def verify_email(

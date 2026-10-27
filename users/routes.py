@@ -58,7 +58,16 @@ def create_user_router(
 
             Accepts UserSelfUpdate, not UserUpdate: a user must not be able to
             set their own status, roles or is_superuser here.
+
+            Email is refused rather than ignored: changing it here skips the
+            password check and leaves is_verified set (#42). A guarded
+            email-change flow is tracked in #41.
             """
+            if "email" in user_data.model_fields_set:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email can't be changed through this endpoint"
+                )
             return await user_service.update_user(
                 current_user.id, UserUpdate(**user_data.model_dump(exclude_unset=True))
             )

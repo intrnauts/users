@@ -46,6 +46,17 @@ class UserStatus(str, Enum):
     SUSPENDED = "suspended"
     PENDING = "pending"
 
+class EmailChangeTokenPurpose(str, Enum):
+    """What an email-change token lets its holder do (#41).
+
+    CONFIRM goes to the new address and applies the change. CANCEL goes to the
+    old address while the change is pending. REVERT goes to the old address once
+    the change is applied, and puts the old address back.
+    """
+    CONFIRM = "confirm"
+    CANCEL = "cancel"
+    REVERT = "revert"
+
 class Permission(str, Enum):
     READ = "read"
     WRITE = "write"
@@ -136,6 +147,29 @@ class EmailVerificationToken(Base):
     user_id = Column(Integer, ForeignKey('users.users.id'), nullable=False)
     # SHA-256 digest of the token, never the token itself. See users.verification.
     token = Column(String(255), unique=True, index=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+
+class EmailChangeToken(Base):
+    """A pending or recently applied email change, and the token that acts on it.
+
+    Kept apart from EmailVerificationToken so that a change token can never be
+    redeemed through /verify-email. Both addresses are stored on every row:
+    confirm needs the new one, revert needs the old one.
+    """
+    __tablename__ = "email_change_tokens"
+    __table_args__ = {'schema': 'users'}
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.users.id'), nullable=False)
+    # SHA-256 digest of the token, never the token itself. See users.verification.
+    token = Column(String(255), unique=True, index=True, nullable=False)
+    purpose = Column(String(20), nullable=False)  # an EmailChangeTokenPurpose value
+    old_email = Column(String(255), nullable=False)
+    new_email = Column(String(255), nullable=False)
     expires_at = Column(DateTime, nullable=False)
     used = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)

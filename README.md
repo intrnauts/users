@@ -680,7 +680,15 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.4.1 (Latest)
+### v0.4.2 (Latest)
+- 🐛 Fixed `last_login` never being saved: it stayed `NULL` for every user.
+  `login()` now records it once the login succeeds and a token is issued, so a
+  correct password on a `pending`, `inactive` or unverified account no longer
+  counts. `authenticate_user()` no longer sets it. Custom
+  `UserRepositoryInterface` implementations need the new `touch_last_login()`
+  method. No schema change, so no migration is needed (#2)
+
+### v0.4.1
 - ✉️ **Behaviour change:** completing a password reset now marks the address
   verified, since the reset link proves control of the inbox just as a
   verification link does. Any outstanding verification links are invalidated.

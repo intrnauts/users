@@ -47,6 +47,12 @@ class VerificationConfig:
     # How long the old address can undo an applied email change.
     email_change_revert_ttl_days: int = 7
 
+    # URL template for the three email-change links, with {action} (confirm,
+    # cancel or revert) and {token} placeholders, e.g.
+    # "https://app.example.com/account/email/{action}?token={token}". When None
+    # the emails carry the bare token.
+    email_change_url_template: Optional[str] = None
+
     # URL template containing a {token} placeholder, e.g.
     # "https://app.example.com/verify-email?token={token}". When None the email
     # carries the bare token.

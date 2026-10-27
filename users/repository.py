@@ -104,7 +104,9 @@ class UserRepositoryInterface(ABC):
         pass
 
     @abstractmethod
-    async def delete_user_email_change_tokens(self, user_id: int) -> bool:
+    async def delete_user_email_change_tokens(
+        self, user_id: int, purposes: Optional[List[str]] = None
+    ) -> bool:
         pass
 
 class SQLAlchemyUserRepository(UserRepositoryInterface):
@@ -390,11 +392,16 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         self.db.commit()
         return True
 
-    async def delete_user_email_change_tokens(self, user_id: int) -> bool:
-        """Delete all email-change tokens for a user"""
-        tokens = self.db.query(EmailChangeToken).filter(
+    async def delete_user_email_change_tokens(
+        self, user_id: int, purposes: Optional[List[str]] = None
+    ) -> bool:
+        """Delete a user's email-change tokens, or only those with the given purposes"""
+        query = self.db.query(EmailChangeToken).filter(
             EmailChangeToken.user_id == user_id
-        ).all()
+        )
+        if purposes is not None:
+            query = query.filter(EmailChangeToken.purpose.in_(purposes))
+        tokens = query.all()
 
         for token in tokens:
             self.db.delete(token)

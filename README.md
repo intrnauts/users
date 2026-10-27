@@ -250,7 +250,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `POST /users/register` - Register new user
 - `POST /users/login` - Login and get access token
 - `GET /users/me` - Get current user info
-- `PUT /users/me` - Update current user
+- `PUT /users/me` - Update current user (username and name; a request that
+  includes `email` is refused with a 400)
 - `POST /users/change-password` - Change password (requires current password)
 - `POST /users/verify-email` - Confirm an email address with the token from the verification email
 - `POST /users/verify-email/resend` - Request a fresh verification email
@@ -680,7 +681,15 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.4.2 (Latest)
+### v0.4.3 (Latest)
+- 🛡️ **Behaviour change:** `PUT /users/me` now refuses a request that includes
+  `email`, with a 400, and applies nothing from it. Changing the email there
+  skipped the password check, sent no confirmation to the new address and left
+  `is_verified` set. Admins can still change a user's email through
+  `PUT /users/{user_id}`. Clients that send `email` to `PUT /users/me` should
+  stop. A guarded self-service email change is planned (#41) (#42)
+
+### v0.4.2
 - 🐛 Fixed `last_login` never being saved: it stayed `NULL` for every user.
   `login()` now records it once the login succeeds and a token is issued, so a
   correct password on a `pending`, `inactive` or unverified account no longer

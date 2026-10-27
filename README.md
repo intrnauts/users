@@ -10,6 +10,7 @@ A flexible and robust user management package for FastAPI backends, providing au
 - 📧 **Email Integration** - AWS SES and SMTP support for password reset and verification
 - ✉️ **Email Verification** - Signup verification flow with configurable activation policy
 - 🔑 **Password Reset** - Secure token-based password reset flow
+- 📮 **Email Change** - Opt-in self-service email change, confirmed by the new address and reversible from the old one
 - 🔧 **Database Adapters** - Support for SQLAlchemy and MongoDB
 - 🚀 **FastAPI Integration** - Ready-to-use dependencies and routers
 - 🧪 **Comprehensive Testing** - Full test suite included
@@ -253,6 +254,10 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `PUT /users/me` - Update current user (username and name; a request that
   includes `email` is refused with a 400)
 - `POST /users/change-password` - Change password (requires current password)
+- `POST /users/me/email` - Start an email change (requires current password; off unless enabled, see [Changing an Email Address](#changing-an-email-address))
+- `POST /users/me/email/confirm` - Apply an email change with the token sent to the new address
+- `POST /users/email/cancel` - Stop a pending email change with the token sent to the current address
+- `POST /users/email/revert` - Put back the previous address with the token sent to it
 - `POST /users/verify-email` - Confirm an email address with the token from the verification email
 - `POST /users/verify-email/resend` - Request a fresh verification email
 - `POST /users/password-reset/request` - Request password reset (sends email)
@@ -585,6 +590,88 @@ Users who registered before this change have `is_verified = false`. Leave
 `require_verified_email` off until you have either backfilled them or asked them
 to verify, or they will be locked out.
 
+## Changing an Email Address
+
+Users can change their own email address once an app turns it on. It's **off by
+default**: until then `POST /users/me/email` returns 403, and `PUT /users/me`
+refuses `email` either way. Admins can always change an address through
+`PUT /users/{user_id}`.
+
+### Setup
+
+```python
+VerificationConfig(
+    allow_email_change=True,
+    email_change_url_template="https://yourapp.com/account/email/{action}?token={token}",
+)
+```
+
+`{action}` is `confirm`, `cancel` or `revert`. Your frontend reads the token and
+posts it to the matching endpoint below. Without a template the emails carry the
+bare token.
+
+### Configuration
+
+| Setting | Default | Effect |
+|---|---|---|
+| `allow_email_change` | `False` | Let users change their own email address |
+| `email_change_revert_ttl_days` | `7` | How long the old address can undo an applied change |
+| `email_change_url_template` | `None` | URL with `{action}` and `{token}` placeholders for the three links |
+
+Confirm and cancel links last `verification_token_ttl_hours`.
+
+### Flow
+
+```
+POST /users/me/email   {"current_password": "...", "new_email": "new@example.com"}
+                       (logged in)
+    -> new address:     confirm link
+    -> current address: notice with a cancel link
+       the account keeps its current address for now
+
+POST /users/me/email/confirm   {"token": "..."}     (no login: the token is the proof)
+    -> email = new address, is_verified = true
+    -> outstanding reset and verification links stop working
+    -> old address: notice with a revert link, valid for 7 days
+
+POST /users/email/cancel   {"token": "..."}     (no login)
+    -> pending change dropped, password reset forced
+
+POST /users/email/revert   {"token": "..."}     (no login)
+    -> old address restored and verified, every other link invalidated,
+       password reset forced (the reset link goes to the restored address)
+```
+
+**Why cancel and revert reset the password:** a change request needs the current
+password, so a change the owner didn't make means someone else knows it. The
+password is replaced with a random one nobody knows, and a normal reset link is
+sent to the account's address.
+
+Other safeguards:
+- A new request replaces a pending one but never removes a live revert link, so
+  a second change can't take away the owner's way back.
+- A link only works for its own action: a cancel link can't confirm.
+- The new address is checked again when the change is confirmed, in case it was
+  registered in the meantime.
+- If another account has taken the old address by the time of a revert, the
+  revert is refused with 409 and the owner is told to contact an administrator.
+
+**Limit:** access tokens already issued keep working until they expire, even
+after a cancel or revert. Keep `access_token_expire_minutes` short (#7).
+
+### Database migration
+
+Email change adds one table, `users.email_change_tokens`:
+
+```bash
+cp migrations/0003_add_email_change_tokens.py <your-project>/alembic/versions/
+# set down_revision to your current head, then
+alembic upgrade head
+```
+
+It only creates the table. For a new database, `setup_users_package(create_tables=True)`
+creates it along with the others.
+
 ## Models
 
 ### User Model
@@ -681,7 +768,26 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.4.3 (Latest)
+### v0.5.0 (Latest)
+- 📮 **Self-service email change**, off by default. Turn it on with
+  `VerificationConfig(allow_email_change=True)`. The change needs the current
+  password and is applied only once the new address confirms it. The old
+  address gets a cancel link while the change is pending, and a revert link
+  (`email_change_revert_ttl_days`, default 7) once it's applied. Cancel and
+  revert both force a password reset. See
+  [Changing an Email Address](#changing-an-email-address) (#41)
+- New endpoints: `POST /users/me/email`, `POST /users/me/email/confirm`,
+  `POST /users/email/cancel`, `POST /users/email/revert`
+- 🐘 **Migration needed:** `migrations/0003_add_email_change_tokens.py` creates
+  `users.email_change_tokens`. Run it when you upgrade, even if you leave email
+  change off: `delete_user()` now clears that table and fails without it
+- ⚠️ **Breaking for custom repositories:** `UserRepositoryInterface` has four
+  new abstract methods: `create_email_change_token`, `get_email_change_token`,
+  `mark_email_change_token_as_used` and `delete_user_email_change_tokens`.
+  `SQLAlchemyUserRepository` implements them
+- `PUT /users/me`'s refusal of `email` now points to `POST /users/me/email`
+
+### v0.4.3
 - 🛡️ **Behaviour change:** `PUT /users/me` now refuses a request that includes
   `email`, with a 400, and applies nothing from it. Changing the email there
   skipped the password check, sent no confirmation to the new address and left

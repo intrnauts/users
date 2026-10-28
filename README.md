@@ -962,7 +962,28 @@ Each version's details are in the changelog below.
 
 ## Changelog
 
-### v0.6.1 (Latest)
+### v0.7.0 (Latest)
+- 🗑️ **Self-service account deletion**, off by default. Turn it on with
+  `VerificationConfig(allow_self_delete=True)`. `POST /users/me/delete` (with
+  the current password) deactivates the account at once and emails confirm and
+  keep links; confirming starts a grace period with a restore link. Accounts
+  are deleted for good by `purge_due_deletions()`, which your app schedules,
+  and the address can then be registered again. See
+  [Deleting Your Own Account](#deleting-your-own-account) (#29)
+- New endpoints: `POST /users/me/delete`, `POST /users/delete/confirm`,
+  `POST /users/delete/keep`, `POST /users/delete/restore`
+- 🐘 **Migration only if you turn self-delete on:**
+  `migrations/0005_add_account_deletions.py` creates two tables and changes
+  nothing else. Apps that leave the feature off can upgrade without it
+- ⚠️ **Behaviour change:** `DELETE /users/{user_id}` refuses to delete the only
+  active superuser, with a 409
+- `UserRepositoryInterface` has seven new methods for self-delete. They aren't
+  abstract, so custom repositories keep working and need them only to turn
+  self-delete on
+- 📋 New [Upgrading](#upgrading) section: each version's migration, whether
+  it's required, and what else to check
+
+### v0.6.1
 - 🛡️ Access tokens now carry the user id (`uid`) next to the email, and a
   token is accepted only for the account it was issued to. Before, a token
   issued to a deleted account worked for a new account registered with the

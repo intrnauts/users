@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from .models import (
     User, Role, PermissionModel, PasswordResetToken, EmailVerificationToken, EmailChangeToken,
+    AccountDeletion, AccountDeletionToken, AccountDeletionTokenPurpose, UserStatus,
     UserCreate, UserUpdate, normalize_email
 )
 from .deletion import run_on_user_delete
@@ -116,6 +117,41 @@ class UserRepositoryInterface(ABC):
         self, user_id: int, purposes: Optional[List[str]] = None
     ) -> bool:
         pass
+
+    # Self-delete (#29). Not abstract: a custom repository keeps working, and
+    # needs these only if the app turns self-delete on.
+
+    async def create_account_deletion(
+        self, user_id: int, requested_at: datetime, purge_at: datetime,
+        token_hashes: Dict[str, str]
+    ) -> AccountDeletion:
+        """Record the request, store its tokens ({purpose: digest}, each
+        expiring at purge_at) and make the account inactive, all at once."""
+        raise NotImplementedError
+
+    async def get_account_deletion(self, user_id: int) -> Optional[AccountDeletion]:
+        raise NotImplementedError
+
+    async def get_account_deletion_by_id(self, deletion_id: int) -> Optional[AccountDeletion]:
+        raise NotImplementedError
+
+    async def get_account_deletion_token(self, token_hash: str) -> Optional[AccountDeletionToken]:
+        raise NotImplementedError
+
+    async def confirm_account_deletion(
+        self, deletion_id: int, confirmed_at: datetime, purge_at: datetime, restore_token_hash: str
+    ) -> AccountDeletion:
+        """Mark the request confirmed with its new purge date, and replace its
+        tokens with one restore token expiring then, all at once."""
+        raise NotImplementedError
+
+    async def cancel_account_deletion(self, deletion_id: int, status: Optional[str] = None) -> bool:
+        """Remove the request and its tokens, and set the user's status if one
+        is given, all at once."""
+        raise NotImplementedError
+
+    async def list_due_account_deletions(self, now: datetime, limit: int = 100) -> List[AccountDeletion]:
+        raise NotImplementedError
 
 class SQLAlchemyUserRepository(UserRepositoryInterface):
     def __init__(self, db_session: Session):
@@ -446,6 +482,76 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
 
         self.db.commit()
         return True
+
+    async def create_account_deletion(
+        self, user_id: int, requested_at: datetime, purge_at: datetime,
+        token_hashes: Dict[str, str]
+    ) -> AccountDeletion:
+        deletion = AccountDeletion(user_id=user_id, requested_at=requested_at, purge_at=purge_at)
+        self.db.add(deletion)
+        self.db.flush()
+        for purpose, token_hash in token_hashes.items():
+            self.db.add(AccountDeletionToken(
+                deletion_id=deletion.id, token=token_hash, purpose=purpose, expires_at=purge_at
+            ))
+        # Deactivated in the same commit, so the account can't end up inactive
+        # with no request and no way back
+        self.db.query(User).filter(User.id == user_id).update(
+            {User.status: UserStatus.INACTIVE.value}, synchronize_session=False
+        )
+        self.db.commit()
+        self.db.refresh(deletion)
+        return deletion
+
+    async def get_account_deletion(self, user_id: int) -> Optional[AccountDeletion]:
+        return self.db.query(AccountDeletion).filter(AccountDeletion.user_id == user_id).first()
+
+    async def get_account_deletion_by_id(self, deletion_id: int) -> Optional[AccountDeletion]:
+        return self.db.query(AccountDeletion).filter(AccountDeletion.id == deletion_id).first()
+
+    async def get_account_deletion_token(self, token_hash: str) -> Optional[AccountDeletionToken]:
+        return self.db.query(AccountDeletionToken).filter(
+            AccountDeletionToken.token == token_hash
+        ).first()
+
+    async def confirm_account_deletion(
+        self, deletion_id: int, confirmed_at: datetime, purge_at: datetime, restore_token_hash: str
+    ) -> AccountDeletion:
+        deletion = await self.get_account_deletion_by_id(deletion_id)
+        deletion.confirmed_at = confirmed_at
+        deletion.purge_at = purge_at
+        self.db.query(AccountDeletionToken).filter(
+            AccountDeletionToken.deletion_id == deletion_id
+        ).delete(synchronize_session=False)
+        self.db.add(AccountDeletionToken(
+            deletion_id=deletion_id, token=restore_token_hash,
+            purpose=AccountDeletionTokenPurpose.RESTORE.value, expires_at=purge_at
+        ))
+        self.db.commit()
+        self.db.refresh(deletion)
+        return deletion
+
+    async def cancel_account_deletion(self, deletion_id: int, status: Optional[str] = None) -> bool:
+        deletion = await self.get_account_deletion_by_id(deletion_id)
+        if not deletion:
+            return False
+        # Tokens go explicitly rather than through ON DELETE CASCADE, which
+        # SQLite only honours with foreign keys turned on
+        self.db.query(AccountDeletionToken).filter(
+            AccountDeletionToken.deletion_id == deletion_id
+        ).delete(synchronize_session=False)
+        if status is not None:
+            self.db.query(User).filter(User.id == deletion.user_id).update(
+                {User.status: status}, synchronize_session=False
+            )
+        self.db.delete(deletion)
+        self.db.commit()
+        return True
+
+    async def list_due_account_deletions(self, now: datetime, limit: int = 100) -> List[AccountDeletion]:
+        return self.db.query(AccountDeletion).filter(
+            AccountDeletion.purge_at <= now
+        ).order_by(AccountDeletion.purge_at).limit(limit).all()
 
 class RoleRepository:
     def __init__(self, db_session: Session):

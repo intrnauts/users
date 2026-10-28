@@ -519,6 +519,67 @@ Best regards,
 """
         return await self.send_email(recipient_email, "Your Account Is Active Again", body_text)
 
+    # Self-delete (#29). Through send_email(), so disabled mode logs the
+    # recipient and subject only, never the links.
+
+    @staticmethod
+    def _date(when) -> str:
+        return f"{when.day} {when:%B %Y}"
+
+    async def send_account_deletion_requested(
+        self, recipient_email: str, confirm_link: str, keep_link: str, purge_at
+    ) -> bool:
+        """Acknowledge a deletion request, with links to confirm it or keep the account."""
+        body_text = f"""
+Hello,
+
+We received a request to delete your account. It has been deactivated, and it will be deleted for good on {self._date(purge_at)} (UTC).
+
+To confirm the deletion, use this link:
+
+{confirm_link}
+
+To keep your account, use this link instead. It will be active again straight away:
+
+{keep_link}
+
+If you didn't ask for this, use the second link and change your password.
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Your Account Deletion Request", body_text)
+
+    async def send_account_deletion_confirmed(
+        self, recipient_email: str, restore_link: str, purge_at
+    ) -> bool:
+        """Confirm the deletion is scheduled, with a link to undo it until then."""
+        body_text = f"""
+Hello,
+
+You confirmed the deletion of your account. It will be deleted for good on {self._date(purge_at)} (UTC).
+
+Until then you can change your mind and restore it with this link:
+
+{restore_link}
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Your Account Will Be Deleted", body_text)
+
+    async def send_account_deleted(self, recipient_email: str) -> bool:
+        """Tell the user their account is gone."""
+        body_text = f"""
+Hello,
+
+Your account has been deleted, as you asked. You can register again with this address at any time.
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Your Account Has Been Deleted", body_text)
+
 # Global email service instance
 _email_service: Optional[EmailService] = None
 

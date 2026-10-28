@@ -57,6 +57,17 @@ class EmailChangeTokenPurpose(str, Enum):
     CANCEL = "cancel"
     REVERT = "revert"
 
+class AccountDeletionTokenPurpose(str, Enum):
+    """What an account-deletion token lets its holder do (#29).
+
+    CONFIRM and KEEP are sent when deletion is requested: confirm it, or cancel
+    it and keep the account. RESTORE is sent once it's confirmed, and cancels it
+    any time before the purge.
+    """
+    CONFIRM = "confirm"
+    KEEP = "keep"
+    RESTORE = "restore"
+
 class Permission(str, Enum):
     READ = "read"
     WRITE = "write"
@@ -178,6 +189,45 @@ class EmailChangeToken(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User")
+
+class AccountDeletion(Base):
+    """A user's own request to delete their account, until it's purged (#29).
+
+    One row per account. The account is inactive while the row exists.
+    purge_at is stored, not computed, so changing the configured periods later
+    doesn't move a request already made.
+
+    Neither this table nor its tokens are reachable from User, and both
+    reference their parent with ON DELETE CASCADE. So an app that never turns
+    self-delete on never reads them, and doesn't need migration 0005.
+    """
+    __tablename__ = "account_deletions"
+    __table_args__ = {'schema': 'users'}
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey('users.users.id', ondelete='CASCADE'),
+        unique=True, nullable=False
+    )
+    requested_at = Column(DateTime, nullable=False)
+    confirmed_at = Column(DateTime, nullable=True)
+    purge_at = Column(DateTime, index=True, nullable=False)
+
+class AccountDeletionToken(Base):
+    """A confirm, keep or restore link for an account deletion (#29)."""
+    __tablename__ = "account_deletion_tokens"
+    __table_args__ = {'schema': 'users'}
+
+    id = Column(Integer, primary_key=True, index=True)
+    deletion_id = Column(
+        Integer, ForeignKey('users.account_deletions.id', ondelete='CASCADE'),
+        nullable=False
+    )
+    # SHA-256 digest of the token, never the token itself. See users.verification.
+    token = Column(String(255), unique=True, index=True, nullable=False)
+    purpose = Column(String(20), nullable=False)  # an AccountDeletionTokenPurpose value
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 # Pydantic schemas for API
 class UserBase(BaseModel):
@@ -328,4 +378,11 @@ class EmailChangeRequest(BaseModel):
 
 class EmailChangeTokenAction(BaseModel):
     """A token from an email-change link: confirm, cancel or revert."""
+    token: str
+
+class AccountDeletionRequest(BaseModel):
+    current_password: str
+
+class AccountDeletionTokenAction(BaseModel):
+    """A token from an account-deletion link: confirm, keep or restore."""
     token: str

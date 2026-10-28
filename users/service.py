@@ -6,7 +6,8 @@ from .models import (
     User, UserCreate, UserUpdate, UserLogin, Token, UserResponse, UserStatus,
     PasswordResetRequest, PasswordResetConfirm,
     EmailVerificationConfirm, EmailVerificationResend,
-    EmailChangeRequest, EmailChangeTokenAction, EmailChangeTokenPurpose
+    EmailChangeRequest, EmailChangeTokenAction, EmailChangeTokenPurpose,
+    AccountDeletionRequest, AccountDeletionTokenAction, AccountDeletionTokenPurpose
 )
 from .repository import UserRepositoryInterface, RoleRepository, PermissionRepository
 from .auth import get_auth_manager
@@ -166,6 +167,13 @@ class UserService:
                 detail="Your account is pending admin approval.",
             )
         if user.status == UserStatus.INACTIVE.value:
+            # Read only with self-delete on, so apps without migration 0005
+            # never touch the table (#29)
+            if config.allow_self_delete and await self.user_repo.get_account_deletion(user.id):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Your account is scheduled for deletion. Use the link in the email we sent to keep or restore it.",
+                )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Your account has been deactivated. Please contact an admin.",
@@ -322,7 +330,22 @@ class UserService:
                     status_code=status.HTTP_409_CONFLICT,
                     detail="Suspend or deactivate the account before deleting it"
                 )
+        user = await self.user_repo.get_user_by_id(user_id)
+        if user and await self._is_last_admin(user):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Can't delete the only active admin"
+            )
         return await self.user_repo.delete_user(user_id)
+
+    async def _is_last_admin(self, user: User) -> bool:
+        """Whether removing this user would leave no active superuser (#29)."""
+        if not user.is_superuser:
+            return False
+        admins = await self.user_repo.list_users(
+            limit=2, filters={"is_superuser": True, "status": UserStatus.ACTIVE.value}
+        )
+        return not any(admin.id != user.id for admin in admins)
 
     async def list_users(
         self,
@@ -832,6 +855,189 @@ class UserService:
 
     def _email_change_link(self, action: str, token: str) -> str:
         template = get_verification_config().email_change_url_template
+        if template is None:
+            return token
+        return template.format(action=action, token=token)
+
+    # Self-delete (#29). The account is deactivated at once and deleted for good
+    # by purge_due_deletions() once its period ends: unconfirmed requests
+    # account_deletion_unconfirmed_days after the request, confirmed ones
+    # account_deletion_grace_days after confirming. Until then the keep or
+    # restore link puts it back.
+
+    async def request_account_deletion(self, user_id: int, request_data: AccountDeletionRequest) -> datetime:
+        """Start deleting a logged-in user's own account. Returns the purge date.
+
+        Raises:
+            HTTPException: 403 if self-delete is off, 400 if the password is
+                wrong, 409 if this is the only active admin.
+        """
+        config = self._require_self_delete()
+
+        user = await self.user_repo.get_user_by_id(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        auth_manager = get_auth_manager()
+        if not auth_manager.verify_password(request_data.current_password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password is incorrect"
+            )
+        if await self._is_last_admin(user):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You're the only active admin. Make someone else an admin before deleting your account."
+            )
+
+        # A request left behind when an admin reactivated the account
+        stale = await self.user_repo.get_account_deletion(user.id)
+        if stale:
+            await self.user_repo.cancel_account_deletion(stale.id)
+
+        now = datetime.utcnow()
+        purge_at = now + timedelta(days=config.account_deletion_unconfirmed_days)
+        confirm_token, keep_token = generate_token(), generate_token()
+        await self.user_repo.create_account_deletion(
+            user.id, requested_at=now, purge_at=purge_at,
+            token_hashes={
+                AccountDeletionTokenPurpose.CONFIRM.value: hash_token(confirm_token),
+                AccountDeletionTokenPurpose.KEEP.value: hash_token(keep_token),
+            }
+        )
+
+        try:
+            email_service = get_email_service()
+            await email_service.send_account_deletion_requested(
+                recipient_email=user.email,
+                confirm_link=self._account_deletion_link("confirm", confirm_token),
+                keep_link=self._account_deletion_link("keep", keep_token),
+                purge_at=purge_at
+            )
+        except Exception as e:
+            logger.error(f"Failed to send account deletion email: {e}")
+
+        return purge_at
+
+    async def confirm_account_deletion(self, action_data: AccountDeletionTokenAction) -> datetime:
+        """Confirm a deletion request. Starts the grace period; returns the purge date."""
+        config = self._require_self_delete()
+        deletion = await self._redeem_account_deletion_token(
+            action_data.token, AccountDeletionTokenPurpose.CONFIRM
+        )
+
+        now = datetime.utcnow()
+        purge_at = now + timedelta(days=config.account_deletion_grace_days)
+        restore_token = generate_token()
+        await self.user_repo.confirm_account_deletion(
+            deletion.id, confirmed_at=now, purge_at=purge_at,
+            restore_token_hash=hash_token(restore_token)
+        )
+
+        user = await self.user_repo.get_user_by_id(deletion.user_id)
+        try:
+            email_service = get_email_service()
+            await email_service.send_account_deletion_confirmed(
+                recipient_email=user.email,
+                restore_link=self._account_deletion_link("restore", restore_token),
+                purge_at=purge_at
+            )
+        except Exception as e:
+            logger.error(f"Failed to send account deletion email: {e}")
+
+        return purge_at
+
+    async def keep_account(self, action_data: AccountDeletionTokenAction) -> bool:
+        """Cancel an unconfirmed deletion request; the account is active again."""
+        self._require_self_delete()
+        deletion = await self._redeem_account_deletion_token(
+            action_data.token, AccountDeletionTokenPurpose.KEEP
+        )
+        return await self._end_account_deletion(deletion)
+
+    async def restore_account(self, action_data: AccountDeletionTokenAction) -> bool:
+        """Cancel a confirmed deletion before the purge; the account is active again."""
+        self._require_self_delete()
+        deletion = await self._redeem_account_deletion_token(
+            action_data.token, AccountDeletionTokenPurpose.RESTORE
+        )
+        return await self._end_account_deletion(deletion)
+
+    async def purge_due_deletions(self, now: datetime = None, limit: int = 100) -> int:
+        """Delete for good every account whose deletion period has ended.
+
+        The app schedules this; the package has no scheduler. It's safe to run
+        often and from more than one place. Each delete runs the on_user_delete
+        hook. A delete that fails is logged and retried on the next run.
+        Returns the number of accounts deleted.
+        """
+        now = now or datetime.utcnow()
+        deleted = 0
+        for deletion in await self.user_repo.list_due_account_deletions(now, limit=limit):
+            user = await self.user_repo.get_user_by_id(deletion.user_id)
+            if user is None:
+                continue
+            # An admin changed the account's status while it was pending: the
+            # admin's decision wins, and the request is dropped
+            if user.status != UserStatus.INACTIVE.value:
+                await self.user_repo.cancel_account_deletion(deletion.id)
+                continue
+
+            email = user.email
+            try:
+                await self.user_repo.delete_user(user.id)
+            except Exception as e:
+                logger.error(f"Failed to purge account {user.id}: {e}")
+                continue
+            deleted += 1
+
+            try:
+                await get_email_service().send_account_deleted(email)
+            except Exception as e:
+                logger.error(f"Failed to send account deleted email: {e}")
+
+        return deleted
+
+    async def _end_account_deletion(self, deletion) -> bool:
+        user = await self.user_repo.get_user_by_id(deletion.user_id)
+        # Back to active only from the inactive state the request set. If an
+        # admin suspended the account meanwhile, it stays suspended.
+        new_status = UserStatus.ACTIVE.value if user.status == UserStatus.INACTIVE.value else None
+        return await self.user_repo.cancel_account_deletion(deletion.id, status=new_status)
+
+    def _require_self_delete(self):
+        config = get_verification_config()
+        if not config.allow_self_delete:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account deletion is not enabled"
+            )
+        return config
+
+    async def _redeem_account_deletion_token(self, token: str, purpose: AccountDeletionTokenPurpose):
+        """Look up a live account-deletion token of the given purpose, and its request.
+
+        Tokens are removed once acted on, so an unknown, spent, or wrong-purpose
+        token all get the same error.
+        """
+        found = await self.user_repo.get_account_deletion_token(hash_token(token))
+        if not found or found.purpose != purpose.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired account deletion token"
+            )
+        if datetime.utcnow() > found.expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Account deletion token has expired"
+            )
+        return await self.user_repo.get_account_deletion_by_id(found.deletion_id)
+
+    def _account_deletion_link(self, action: str, token: str) -> str:
+        template = get_verification_config().account_deletion_url_template
         if template is None:
             return token
         return template.format(action=action, token=token)

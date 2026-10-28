@@ -57,6 +57,25 @@ class VerificationConfig:
     # admin.
     suspension_contact: Optional[str] = None
 
+    # Let users delete their own account (#29). Off by default. Needs migration
+    # 0005. The account is deactivated at once and deleted for good once its
+    # period ends, by purge_due_deletions(), which the app schedules.
+    allow_self_delete: bool = False
+
+    # Days until an unconfirmed deletion request is purged, counted from the
+    # request.
+    account_deletion_unconfirmed_days: int = 14
+
+    # Days until a confirmed deletion is purged, counted from the confirmation.
+    # The restore link works until then.
+    account_deletion_grace_days: int = 14
+
+    # URL template for the three account-deletion links, with {action}
+    # (confirm, keep or restore) and {token} placeholders, e.g.
+    # "https://app.example.com/account/delete/{action}?token={token}". When None
+    # the emails carry the bare token.
+    account_deletion_url_template: Optional[str] = None
+
     # URL template for the three email-change links, with {action} (confirm,
     # cancel or revert) and {token} placeholders, e.g.
     # "https://app.example.com/account/email/{action}?token={token}". When None

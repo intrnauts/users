@@ -850,7 +850,30 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.5.1 (Latest)
+### v0.6.0 (Latest)
+- ⏸️ **Suspension with a reason.** `POST /users/{user_id}/suspend` takes an
+  optional `reason`, stores it with the time (`suspension_reason`,
+  `suspended_at`, returned on the user) and emails the user.
+  `POST /users/{user_id}/reactivate` makes the account active again, clears
+  both and emails the user. A status change through `PUT /users/{user_id}`
+  does the same. `suspension_contact` sets how the email says to reach you.
+  See [Suspending an Account](#suspending-an-account) (#48)
+- 🧹 **Delete hook:** `configure_user_deletion(on_user_delete=...)` runs your
+  app's cleanup inside `delete_user()`, in the same transaction, before the
+  user row is deleted. If it raises, nothing is deleted. See
+  [Cleaning Up When a User Is Deleted](#cleaning-up-when-a-user-is-deleted) (#49)
+- ⚠️ **Behaviour change:** `DELETE /users/{user_id}` now refuses an `active` or
+  `pending` account with a 409, "Suspend or deactivate the account before
+  deleting it". Suspend or deactivate first, or set
+  `VerificationConfig(admin_delete_requires_suspension=False)` for the old
+  behaviour (#48)
+- 🐘 **Migration needed:** `migrations/0004_add_suspension_fields.py` adds two
+  nullable columns to `users.users`. Run it when you upgrade, even if you never
+  suspend anyone: the model reads both columns
+- ⚠️ **Breaking for custom repositories:** `UserRepositoryInterface` has a new
+  abstract method, `set_status`. `SQLAlchemyUserRepository` implements it
+
+### v0.5.1
 - 🐛 **Behaviour change:** login now refuses a `suspended` account with a 401,
   "Your account has been suspended. Please contact an admin.", as it already
   did for `inactive`. Before, a suspended user got a token and then a 400

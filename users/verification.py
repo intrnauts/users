@@ -47,6 +47,16 @@ class VerificationConfig:
     # How long the old address can undo an applied email change.
     email_change_revert_ttl_days: int = 7
 
+    # Refuse an admin delete unless the account is suspended or inactive (#48),
+    # so a delete always follows a reversible step. Set False for the old
+    # behaviour, where any account can be deleted outright.
+    admin_delete_requires_suspension: bool = True
+
+    # How a suspended user can reach an admin, e.g. "support@example.com". It
+    # goes into the suspension email. When None the email says to contact an
+    # admin.
+    suspension_contact: Optional[str] = None
+
     # URL template for the three email-change links, with {action} (confirm,
     # cancel or revert) and {token} placeholders, e.g.
     # "https://app.example.com/account/email/{action}?token={token}". When None

@@ -9,7 +9,7 @@ from .models import (
     UserStatus, Permission, configure_base, normalize_email,
     PasswordResetRequest, PasswordResetConfirm, PasswordChange,
     EmailVerificationConfirm, EmailVerificationResend,
-    EmailChangeRequest, EmailChangeTokenAction
+    EmailChangeRequest, EmailChangeTokenAction, UserSuspend
 )
 
 # Authentication
@@ -254,7 +254,7 @@ __all__ = [
     "UserStatus", "Permission", "configure_base", "normalize_email",
     "PasswordResetRequest", "PasswordResetConfirm", "PasswordChange",
     "EmailVerificationConfirm", "EmailVerificationResend",
-    "EmailChangeRequest", "EmailChangeTokenAction",
+    "EmailChangeRequest", "EmailChangeTokenAction", "UserSuspend",
 
     # Authentication
     "AuthConfig", "AuthManager", "PasswordManager", "JWTManager",

@@ -267,7 +267,10 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `GET /users/` - List users
 - `GET /users/{user_id}` - Get user by ID
 - `PUT /users/{user_id}` - Update user
-- `DELETE /users/{user_id}` - Delete user
+- `DELETE /users/{user_id}` - Delete user (only a suspended or inactive one, by
+  default; see [Suspending an Account](#suspending-an-account))
+- `POST /users/{user_id}/suspend` - Suspend user, with an optional `reason`, and email them
+- `POST /users/{user_id}/reactivate` - Make a suspended user active again, and email them
 - `POST /users/{user_id}/verify` - Verify user
 - `GET /users/{user_id}/permissions` - Get user permissions
 
@@ -700,6 +703,55 @@ configure_user_deletion(on_user_delete=on_user_delete)
 
 No callback means no change: the delete works as it always has.
 
+## Suspending an Account
+
+Suspension is a reversible admin action that the user is told about. It's also
+the step before an admin delete.
+
+```http
+POST /users/{user_id}/suspend
+{"reason": "Repeated spam in comments"}
+```
+
+- The reason is optional. It's stored with the time of the suspension and
+  returned on the user (`suspension_reason`, `suspended_at`).
+- The user is emailed that their account is suspended, with the reason if
+  there is one and how to reach an admin. Email is best effort: a failed send
+  doesn't undo the suspension.
+- A suspended user can't log in (401), and tokens already issued stop working.
+- An admin can't suspend their own account.
+- `POST /users/{user_id}/reactivate` makes the account active again, clears the
+  reason and time, and emails the user.
+
+Setting `status` through `PUT /users/{user_id}` does the same: moving to
+`suspended` suspends with no reason, and moving from `suspended` clears the
+reason. Only a move to `active` sends the reactivation email.
+
+**Admin delete needs a suspended or inactive account.** `DELETE /users/{user_id}`
+on any other account returns 409, "Suspend or deactivate the account before
+deleting it". The delete runs the [delete hook](#cleaning-up-when-a-user-is-deleted).
+
+### Configuration
+
+| Setting | Default | Effect |
+|---|---|---|
+| `admin_delete_requires_suspension` | `True` | Refuse an admin delete unless the account is suspended or inactive. `False` restores the old behaviour |
+| `suspension_contact` | `None` | How a suspended user can reach you, e.g. `"support@example.com"`. Without it the email says to contact an admin |
+
+Both are `VerificationConfig` fields.
+
+### Database migration
+
+Suspension adds two nullable columns to `users.users`:
+
+```bash
+cp migrations/0004_add_suspension_fields.py <your-project>/alembic/versions/
+# set down_revision to your current head, then
+alembic upgrade head
+```
+
+Accounts already suspended keep their status, with no reason or time.
+
 ## Models
 
 ### User Model
@@ -716,6 +768,8 @@ No callback means no change: the delete works as it always has.
     "created_at": "2023-01-01T00:00:00Z",
     "updated_at": "2023-01-01T00:00:00Z",
     "last_login": "2023-01-01T00:00:00Z",
+    "suspension_reason": null,
+    "suspended_at": null,
     "roles": ["user", "viewer"]
 }
 ```

@@ -484,6 +484,41 @@ Best regards,
 """
         return await self.send_email(recipient_email, "Your Email Address Was Changed", body_text)
 
+    # Suspension (#48). Also through send_email(); neither carries a link.
+
+    async def send_account_suspended_notice(
+        self, recipient_email: str, reason: Optional[str] = None, contact: Optional[str] = None
+    ) -> bool:
+        """Tell a user their account was suspended, with the reason if one was given."""
+        reason_text = f"\nReason: {reason}\n" if reason else ""
+        contact_text = (
+            f"To ask about it, contact {contact}." if contact
+            else "To ask about it, please contact an admin."
+        )
+        body_text = f"""
+Hello,
+
+Your account has been suspended by an admin. You can't log in while it's suspended.
+{reason_text}
+{contact_text}
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Your Account Has Been Suspended", body_text)
+
+    async def send_account_reactivated_notice(self, recipient_email: str) -> bool:
+        """Tell a user their suspended account is active again."""
+        body_text = f"""
+Hello,
+
+Your account is active again. You can log in as before.
+
+Best regards,
+{self.config.sender_name}
+"""
+        return await self.send_email(recipient_email, "Your Account Is Active Again", body_text)
+
 # Global email service instance
 _email_service: Optional[EmailService] = None
 

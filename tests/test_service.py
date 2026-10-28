@@ -243,8 +243,9 @@ class TestUserService:
         assert "Email already registered" in str(exc_info.value.detail)
 
     async def test_delete_user_success(self, user_service, sample_user_data):
-        # Create user
-        user_response = await user_service.create_user(sample_user_data)
+        # Create user, inactive: admin delete refuses an active one (#48)
+        inactive = sample_user_data.model_copy(update={"status": UserStatus.INACTIVE})
+        user_response = await user_service.create_user(inactive, trusted=True)
 
         # Delete user
         success = await user_service.delete_user(user_response.id)

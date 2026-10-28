@@ -230,12 +230,97 @@ class UserService:
                     detail="Username already taken"
                 )
 
+        current = await self.user_repo.get_user_by_id(user_id)
+        if not current:
+            return None
+
+        # Moving into or out of suspended goes through _change_status, so the
+        # suspension fields and the emails follow the status (#48)
+        new_status = user_data.status.value if user_data.status is not None else None
+        status_change = new_status is not None and (
+            (new_status == UserStatus.SUSPENDED.value)
+            != (current.status == UserStatus.SUSPENDED.value)
+        )
+        if status_change:
+            user_data = UserUpdate(**user_data.model_dump(exclude_unset=True, exclude={"status"}))
+
         user = await self.user_repo.update_user(user_id, user_data)
         if not user:
             return None
+        if status_change:
+            user = await self._change_status(user, new_status)
         return self._user_to_response(user)
 
+    async def suspend_user(self, user_id: int, reason: Optional[str] = None) -> Optional[UserResponse]:
+        """Suspend an account, store the optional reason and email the user (#48)."""
+        user = await self.user_repo.get_user_by_id(user_id)
+        if not user:
+            return None
+        if user.status == UserStatus.SUSPENDED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User is already suspended"
+            )
+
+        reason = reason.strip() if reason else None
+        user = await self._change_status(user, UserStatus.SUSPENDED.value, reason or None)
+        return self._user_to_response(user)
+
+    async def reactivate_user(self, user_id: int) -> Optional[UserResponse]:
+        """Make a suspended account active again and email the user (#48)."""
+        user = await self.user_repo.get_user_by_id(user_id)
+        if not user:
+            return None
+        if user.status != UserStatus.SUSPENDED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User is not suspended"
+            )
+
+        user = await self._change_status(user, UserStatus.ACTIVE.value)
+        return self._user_to_response(user)
+
+    async def _change_status(self, user: User, new_status: str, reason: Optional[str] = None) -> User:
+        """Set a status that moves an account into or out of suspended.
+
+        Suspending stores the reason and time; any other status clears them.
+        The user is emailed when suspended and when made active again. Email is
+        best effort: a failed send doesn't undo the change.
+        """
+        suspending = new_status == UserStatus.SUSPENDED.value
+        updated = await self.user_repo.set_status(
+            user.id, new_status,
+            suspension_reason=reason if suspending else None,
+            suspended_at=datetime.utcnow() if suspending else None,
+        )
+
+        try:
+            email_service = get_email_service()
+            if suspending:
+                await email_service.send_account_suspended_notice(
+                    recipient_email=updated.email,
+                    reason=reason,
+                    contact=get_verification_config().suspension_contact
+                )
+            elif new_status == UserStatus.ACTIVE.value:
+                await email_service.send_account_reactivated_notice(updated.email)
+        except Exception as e:
+            logger.error(f"Failed to send account status email: {e}")
+
+        return updated
+
     async def delete_user(self, user_id: int) -> bool:
+        # An admin delete follows a reversible step (#48): only a suspended or
+        # inactive account can be deleted, unless the app turned that off
+        if get_verification_config().admin_delete_requires_suspension:
+            user = await self.user_repo.get_user_by_id(user_id)
+            if not user:
+                return False
+            if user.status not in (UserStatus.SUSPENDED.value, UserStatus.INACTIVE.value):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Suspend or deactivate the account before deleting it"
+                )
         return await self.user_repo.delete_user(user_id)
 
     async def list_users(
@@ -764,6 +849,8 @@ class UserService:
             created_at=user.created_at,
             updated_at=user.updated_at,
             last_login=user.last_login,
+            suspension_reason=user.suspension_reason,
+            suspended_at=user.suspended_at,
             roles=role_names
         )
 

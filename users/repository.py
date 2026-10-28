@@ -7,6 +7,7 @@ from .models import (
     User, Role, PermissionModel, PasswordResetToken, EmailVerificationToken, EmailChangeToken,
     UserCreate, UserUpdate, normalize_email
 )
+from .deletion import run_on_user_delete
 
 class UserRepositoryInterface(ABC):
     @abstractmethod
@@ -190,6 +191,14 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         self.db.query(EmailChangeToken).filter(
             EmailChangeToken.user_id == user_id
         ).delete(synchronize_session=False)
+
+        # The application's own cleanup (#49), in the same transaction. If it
+        # fails, nothing is deleted, the token rows above included.
+        try:
+            await run_on_user_delete(self.db, db_user)
+        except Exception:
+            self.db.rollback()
+            raise
 
         self.db.delete(db_user)
         self.db.commit()

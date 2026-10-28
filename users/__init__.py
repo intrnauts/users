@@ -60,6 +60,9 @@ from .verification import (
     generate_token, hash_token
 )
 
+# Application cleanup when a user is deleted
+from .deletion import configure_user_deletion, get_on_user_delete
+
 # MongoDB support (if available)
 try:
     from .database import (
@@ -286,6 +289,9 @@ __all__ = [
     # Email verification / password reset policy
     "VerificationConfig", "configure_verification", "get_verification_config",
     "generate_token", "hash_token",
+
+    # Application cleanup when a user is deleted
+    "configure_user_deletion", "get_on_user_delete",
 
     # Setup functions
     "setup_users_package", "setup_users_package_async",

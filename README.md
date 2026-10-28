@@ -837,6 +837,11 @@ python advanced_fastapi_app.py
   `/users/verify-email/resend` at your gateway - the package does not do this
 - Note that a password reset does not revoke access tokens already issued to
   that user; they remain valid until they expire
+- Access tokens carry the user's email (`sub`) and id (`uid`). A token is only
+  accepted for the account it was issued to, so if an account is deleted and
+  its address registered again, the old account's tokens don't reach the new
+  one. Tokens issued before v0.6.1 have no `uid` and are accepted until they
+  expire. If you decode tokens yourself, check `uid` too
 
 ## License
 
@@ -850,7 +855,15 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.6.0 (Latest)
+### v0.6.1 (Latest)
+- 🛡️ Access tokens now carry the user id (`uid`) next to the email, and a
+  token is accepted only for the account it was issued to. Before, a token
+  issued to a deleted account worked for a new account registered with the
+  same address until it expired. Tokens issued before this release have no
+  `uid` and still work until they expire, so nobody is logged out. Apps that
+  decode tokens themselves should check `uid` too (#55)
+
+### v0.6.0
 - ⏸️ **Suspension with a reason.** `POST /users/{user_id}/suspend` takes an
   optional `reason`, stores it with the time (`suspension_reason`,
   `suspended_at`, returned on the user) and emails the user.

@@ -63,12 +63,15 @@ class JWTManager:
                 algorithms=[self.config.algorithm]
             )
             email: str = payload.get("sub")
+            user_id = payload.get("uid")
             permissions: List[str] = payload.get("permissions", [])
 
             if email is None:
                 return None
+            if user_id is not None and (not isinstance(user_id, int) or isinstance(user_id, bool)):
+                return None
 
-            return TokenData(email=email, permissions=permissions)
+            return TokenData(email=email, user_id=user_id, permissions=permissions)
         except JWTError:
             return None
 
@@ -76,13 +79,18 @@ class JWTManager:
         self,
         user_email: str,
         permissions: List[str] = None,
-        expires_delta: Optional[timedelta] = None
+        expires_delta: Optional[timedelta] = None,
+        user_id: Optional[int] = None
     ) -> str:
         permissions = permissions or []
         data = {
             "sub": user_email,
             "permissions": permissions
         }
+        # The email alone can name a different account later: a deleted
+        # user's address can be registered again (#55)
+        if user_id is not None:
+            data["uid"] = user_id
         return self.create_access_token(data, expires_delta)
 
 class AuthManager:
@@ -101,9 +109,10 @@ class AuthManager:
         self,
         user_email: str,
         permissions: List[str] = None,
-        expires_delta: Optional[timedelta] = None
+        expires_delta: Optional[timedelta] = None,
+        user_id: Optional[int] = None
     ) -> str:
-        return self.jwt_manager.create_user_token(user_email, permissions, expires_delta)
+        return self.jwt_manager.create_user_token(user_email, permissions, expires_delta, user_id)
 
     def verify_token(self, token: str) -> Optional[TokenData]:
         return self.jwt_manager.verify_token(token)

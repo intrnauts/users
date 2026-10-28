@@ -190,7 +190,8 @@ class UserService:
         auth_manager = get_auth_manager()
         access_token = auth_manager.create_access_token(
             user_email=user.email,
-            permissions=permissions
+            permissions=permissions,
+            user_id=user.id
         )
 
         return Token(

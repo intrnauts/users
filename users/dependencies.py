@@ -67,8 +67,20 @@ async def get_current_user(
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if not _token_is_for(token_data, user):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     return user
+
+def _token_is_for(token_data: TokenData, user) -> bool:
+    """Whether a token was issued to this account, not an earlier one with the
+    same email (#55). Tokens from before the id was added carry none and are
+    accepted until they expire."""
+    return token_data.user_id is None or token_data.user_id == user.id
 
 async def get_current_active_user(
     current_user: User = Depends(get_current_user)
@@ -195,6 +207,8 @@ async def get_current_user_optional(
             return None
 
         user = await user_service.get_user_by_email(token_data.email)
+        if user is None or not _token_is_for(token_data, user):
+            return None
         return user
     except Exception:
         return None

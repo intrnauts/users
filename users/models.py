@@ -267,6 +267,9 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+    # The id of the user the token was issued to (#55). None for tokens issued
+    # before it was added.
+    user_id: Optional[int] = None
     permissions: List[str] = []
 
 class RoleBase(BaseModel):

@@ -118,6 +118,30 @@ class TestUserService:
         assert exc_info.value.status_code == 401
         assert "Incorrect email or password" in str(exc_info.value.detail)
 
+    async def test_login_rejects_suspended_user(self, user_service, sample_user_data, test_db):
+        # Before #32 a suspended user got a token, then "Inactive user" on
+        # every route behind get_current_active_user
+        suspended = sample_user_data.model_copy(update={"status": UserStatus.SUSPENDED})
+        await user_service.create_user(suspended, trusted=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await user_service.login(UserLogin(
+                email=sample_user_data.email,
+                password=sample_user_data.password
+            ))
+
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.detail == (
+            "Your account has been suspended. Please contact an admin."
+        )
+
+        fresh = test_db()
+        try:
+            user = fresh.query(User).filter(User.email == sample_user_data.email).one()
+            assert user.last_login is None
+        finally:
+            fresh.close()
+
     async def test_login_persists_last_login(self, user_service, sample_user_data, test_db):
         active_user = sample_user_data.model_copy(update={"status": UserStatus.ACTIVE})
         await user_service.create_user(active_user, trusted=True)

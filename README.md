@@ -768,7 +768,13 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
-### v0.5.0 (Latest)
+### v0.5.1 (Latest)
+- 🐛 **Behaviour change:** login now refuses a `suspended` account with a 401,
+  "Your account has been suspended. Please contact an admin.", as it already
+  did for `inactive`. Before, a suspended user got a token and then a 400
+  "Inactive user" from every route that needs an active account (#32)
+
+### v0.5.0
 - 📮 **Self-service email change**, off by default. Turn it on with
   `VerificationConfig(allow_email_change=True)`. The change needs the current
   password and is applied only once the new address confirms it. The old

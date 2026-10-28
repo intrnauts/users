@@ -40,6 +40,28 @@ def get_on_user_delete() -> Optional[OnUserDelete]:
     """Get the registered callback, or None."""
     return _on_user_delete
 
+async def purge_due_deletions(db: Session, now=None, limit: int = 100) -> int:
+    """Delete for good every account whose self-delete period has ended (#29).
+
+    For an app's scheduler, outside any request:
+
+        async def purge():
+            db = SessionLocal()
+            try:
+                await purge_due_deletions(db)
+            finally:
+                db.close()
+
+    Returns the number of accounts deleted. See UserService.purge_due_deletions.
+    """
+    from .repository import SQLAlchemyUserRepository, RoleRepository, PermissionRepository
+    from .service import UserService
+
+    service = UserService(
+        SQLAlchemyUserRepository(db), RoleRepository(db), PermissionRepository(db)
+    )
+    return await service.purge_due_deletions(now=now, limit=limit)
+
 async def run_on_user_delete(db: Session, user: User) -> None:
     """Run the registered callback, if any, awaiting it when it is async."""
     if _on_user_delete is None:

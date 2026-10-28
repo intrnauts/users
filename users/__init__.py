@@ -9,7 +9,9 @@ from .models import (
     UserStatus, Permission, configure_base, normalize_email,
     PasswordResetRequest, PasswordResetConfirm, PasswordChange,
     EmailVerificationConfirm, EmailVerificationResend,
-    EmailChangeRequest, EmailChangeTokenAction, UserSuspend
+    EmailChangeRequest, EmailChangeTokenAction, UserSuspend,
+    AccountDeletion, AccountDeletionToken, AccountDeletionTokenPurpose,
+    AccountDeletionRequest, AccountDeletionTokenAction
 )
 
 # Authentication
@@ -61,7 +63,7 @@ from .verification import (
 )
 
 # Application cleanup when a user is deleted
-from .deletion import configure_user_deletion, get_on_user_delete
+from .deletion import configure_user_deletion, get_on_user_delete, purge_due_deletions
 
 # MongoDB support (if available)
 try:
@@ -255,6 +257,8 @@ __all__ = [
     "PasswordResetRequest", "PasswordResetConfirm", "PasswordChange",
     "EmailVerificationConfirm", "EmailVerificationResend",
     "EmailChangeRequest", "EmailChangeTokenAction", "UserSuspend",
+    "AccountDeletion", "AccountDeletionToken", "AccountDeletionTokenPurpose",
+    "AccountDeletionRequest", "AccountDeletionTokenAction",
 
     # Authentication
     "AuthConfig", "AuthManager", "PasswordManager", "JWTManager",
@@ -291,7 +295,7 @@ __all__ = [
     "generate_token", "hash_token",
 
     # Application cleanup when a user is deleted
-    "configure_user_deletion", "get_on_user_delete",
+    "configure_user_deletion", "get_on_user_delete", "purge_due_deletions",
 
     # Setup functions
     "setup_users_package", "setup_users_package_async",

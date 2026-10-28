@@ -258,6 +258,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `POST /users/me/email/confirm` - Apply an email change with the token sent to the new address
 - `POST /users/email/cancel` - Stop a pending email change with the token sent to the current address
 - `POST /users/email/revert` - Put back the previous address with the token sent to it
+- `POST /users/me/delete` - Delete your own account (requires current password; off by default, see [Deleting Your Own Account](#deleting-your-own-account))
+- `POST /users/delete/confirm`, `/users/delete/keep`, `/users/delete/restore` - Act on an account-deletion link (no login)
 - `POST /users/verify-email` - Confirm an email address with the token from the verification email
 - `POST /users/verify-email/resend` - Request a fresh verification email
 - `POST /users/password-reset/request` - Request password reset (sends email)
@@ -752,6 +754,94 @@ alembic upgrade head
 
 Accounts already suspended keep their status, with no reason or time.
 
+## Deleting Your Own Account
+
+Users can delete their own account once an app turns it on. It's **off by
+default**: until then the endpoints below return 403.
+
+The account isn't deleted straight away. It's deactivated at once, and deleted
+for good once a period ends, with an emailed link to undo it until then:
+
+1. **Request:** `POST /users/me/delete` with `{"current_password": ...}`. The
+   account becomes `inactive`, so the caller's token stops working and login is
+   refused ("Your account is scheduled for deletion..."). An email goes out with
+   a **confirm** link and a **keep** link.
+2. **Keep** (`POST /users/delete/keep`): cancels the request. The account is
+   active again.
+3. **Confirm** (`POST /users/delete/confirm`): the purge date moves to
+   `account_deletion_grace_days` from now, and an email goes out with a
+   **restore** link. Unconfirmed requests are purged too, after
+   `account_deletion_unconfirmed_days`.
+4. **Restore** (`POST /users/delete/restore`): cancels a confirmed request any
+   time before the purge.
+5. **Purge:** `purge_due_deletions()` deletes for good every account whose date
+   has passed, runs the [delete hook](#cleaning-up-when-a-user-is-deleted), and
+   emails the user that it's done. The address can then be registered again.
+
+The token routes need no login: the emailed token is the proof. Each token works
+once, and only for its own step.
+
+An admin can't remove the last active admin this way, or through
+`DELETE /users/{user_id}`. If an admin changes the account's status while a
+request is pending, the admin's decision wins: the purge drops the request, and
+keep or restore leave a suspension in place.
+
+### Setup
+
+```python
+VerificationConfig(
+    allow_self_delete=True,
+    account_deletion_url_template="https://yourapp.com/account/delete/{action}?token={token}",
+)
+```
+
+`{action}` is `confirm`, `keep` or `restore`. Your frontend reads the token and
+posts it to the matching endpoint. Without a template the emails carry the bare
+token.
+
+**Schedule the purge.** The package has no scheduler. Run it from yours, as
+often as you like; it's safe to run repeatedly and from more than one place:
+
+```python
+from users import purge_due_deletions
+
+async def purge_deleted_accounts():
+    db = SessionLocal()
+    try:
+        await purge_due_deletions(db)
+    finally:
+        db.close()
+
+scheduler.add_job(purge_deleted_accounts, "interval", hours=1)
+```
+
+A delete that fails, for example because the delete hook raises, is logged and
+tried again on the next run.
+
+### Configuration
+
+| Setting | Default | Effect |
+|---|---|---|
+| `allow_self_delete` | `False` | Let users delete their own account |
+| `account_deletion_unconfirmed_days` | `14` | Days from the request until an unconfirmed request is purged |
+| `account_deletion_grace_days` | `14` | Days from confirming until the account is purged |
+| `account_deletion_url_template` | `None` | URL with `{action}` and `{token}` placeholders for the three links |
+
+Each request stores its own purge date, so changing these later doesn't move a
+request already made.
+
+### Database migration
+
+**Only needed if you turn self-delete on.** It creates two tables and changes
+nothing else. Nothing else in the package reads them, so you can upgrade first
+and run this when you turn the feature on:
+
+```bash
+cp migrations/0005_add_account_deletions.py <your-project>/alembic/versions/
+# set down_revision to your current head, then
+alembic upgrade head
+```
+
 ## Models
 
 ### User Model
@@ -852,6 +942,23 @@ MIT License - see LICENSE file for details.
 - GitHub Issues: Report bugs and request features
 - Documentation: See `/docs` endpoint when running the API
 - Examples: Check the `examples/` directory
+
+## Upgrading
+
+Migrations are a chain: copy every one you don't have yet into your
+`alembic/versions/`, point the first one's `down_revision` at your current
+head, and run `alembic upgrade head` once.
+
+| Version | Migration | Needed | Also check |
+|---|---|---|---|
+| v0.3.0 | `0001_add_email_verification_tokens` | Required | Clears old password-reset tokens; users mid-reset request a new link |
+| v0.3.0 | `0002_normalize_email_case` | Required if any stored address has capitals | Aborts, naming them, if two accounts differ only by case |
+| v0.5.0 | `0003_add_email_change_tokens` | Required | Custom repositories need four new methods |
+| v0.6.0 | `0004_add_suspension_fields` | Required | `DELETE /users/{user_id}` now needs a suspended or inactive account; custom repositories need `set_status` |
+| v0.6.1 | none | | |
+| v0.7.0 | `0005_add_account_deletions` | Only if you turn self-delete on | Admin delete refuses the last active admin |
+
+Each version's details are in the changelog below.
 
 ## Changelog
 

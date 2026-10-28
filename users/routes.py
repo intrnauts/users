@@ -5,7 +5,8 @@ from .models import (
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
     PasswordResetRequest, PasswordResetConfirm, PasswordChange,
     EmailVerificationConfirm, EmailVerificationResend,
-    EmailChangeRequest, EmailChangeTokenAction, UserSuspend
+    EmailChangeRequest, EmailChangeTokenAction, UserSuspend,
+    AccountDeletionRequest, AccountDeletionTokenAction
 )
 from .service import UserService, RoleService, PermissionService
 from .dependencies import (
@@ -89,6 +90,51 @@ def create_user_router(
                     detail="Failed to change password"
                 )
             return {"message": "Password changed successfully"}
+
+        @router.post("/me/delete")
+        async def request_account_deletion(
+            request_data: AccountDeletionRequest,
+            current_user = Depends(get_current_active_user),
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Delete your own account (requires current password).
+
+            The account is deactivated at once, so this token stops working, and
+            is deleted for good on purge_at unless kept or restored through the
+            emailed links. Refused with 403 unless VerificationConfig.allow_self_delete.
+            """
+            purge_at = await user_service.request_account_deletion(current_user.id, request_data)
+            return {
+                "message": "Your account has been deactivated. Check your email to confirm the deletion or keep your account.",
+                "purge_at": purge_at,
+            }
+
+        @router.post("/delete/confirm")
+        async def confirm_account_deletion(
+            action_data: AccountDeletionTokenAction,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Confirm an account deletion with the emailed token. No login needed."""
+            purge_at = await user_service.confirm_account_deletion(action_data)
+            return {"message": "Your account will be deleted", "purge_at": purge_at}
+
+        @router.post("/delete/keep")
+        async def keep_account(
+            action_data: AccountDeletionTokenAction,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Cancel an unconfirmed account deletion with the emailed token. No login needed."""
+            await user_service.keep_account(action_data)
+            return {"message": "Your account is active again"}
+
+        @router.post("/delete/restore")
+        async def restore_account(
+            action_data: AccountDeletionTokenAction,
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Cancel a confirmed account deletion before the purge, with the emailed token. No login needed."""
+            await user_service.restore_account(action_data)
+            return {"message": "Your account is active again"}
 
         @router.post("/me/email")
         async def request_email_change(

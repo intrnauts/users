@@ -98,6 +98,9 @@ class User(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
     user_metadata = Column(Text, nullable=True)  # JSON field for additional data
+    # Set while status is suspended (#48), cleared when the account leaves it
+    suspension_reason = Column(Text, nullable=True)
+    suspended_at = Column(DateTime, nullable=True)
 
     roles = relationship("Role", secondary=user_roles, back_populates="users")
 
@@ -241,10 +244,17 @@ class UserResponse(UserBase):
     created_at: datetime
     updated_at: datetime
     last_login: Optional[datetime] = None
+    suspension_reason: Optional[str] = None
+    suspended_at: Optional[datetime] = None
     roles: List[str] = []
 
     class Config:
         from_attributes = True
+
+class UserSuspend(BaseModel):
+    """Body of POST /users/{user_id}/suspend. The reason is optional, and is
+    stored and included in the email to the user."""
+    reason: Optional[str] = Field(None, max_length=1000)
 
 class UserLogin(BaseModel):
     email: NormalizedEmailStr

@@ -5,7 +5,7 @@ from .models import (
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
     PasswordResetRequest, PasswordResetConfirm, PasswordChange,
     EmailVerificationConfirm, EmailVerificationResend,
-    EmailChangeRequest, EmailChangeTokenAction
+    EmailChangeRequest, EmailChangeTokenAction, UserSuspend
 )
 from .service import UserService, RoleService, PermissionService
 from .dependencies import (
@@ -261,6 +261,42 @@ def create_user_router(
         ):
             """Verify user (admin only)"""
             user = await user_service.verify_user(user_id)
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            return user
+
+        @router.post("/{user_id}/suspend", response_model=UserResponse)
+        async def suspend_user(
+            user_id: int,
+            suspend_data: UserSuspend = Body(default_factory=UserSuspend),
+            current_user = Depends(require_permission("users:write")),
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Suspend a user, with an optional reason, and email them (admin only)"""
+            if user_id == current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You can't suspend your own account"
+                )
+            user = await user_service.suspend_user(user_id, suspend_data.reason)
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            return user
+
+        @router.post("/{user_id}/reactivate", response_model=UserResponse)
+        async def reactivate_user(
+            user_id: int,
+            current_user = Depends(require_permission("users:write")),
+            user_service: UserService = Depends(get_user_service)
+        ):
+            """Make a suspended user active again and email them (admin only)"""
+            user = await user_service.reactivate_user(user_id)
             if not user:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,

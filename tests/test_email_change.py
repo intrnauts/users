@@ -80,7 +80,7 @@ class TestEmailChangeTokenStorage:
 
     async def test_delete_user_removes_their_email_change_tokens(self, user_service, user_repository, create_test_user, db_session):
         """The table references users with no ON DELETE CASCADE, like the others (#21)."""
-        user = await create_test_user()
+        user = await create_test_user(status="inactive")
         await self._token(user_repository, user.id)
 
         assert await user_service.delete_user(user.id) is True

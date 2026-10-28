@@ -54,6 +54,13 @@ class UserRepositoryInterface(ABC):
     async def touch_last_login(self, user_id: int) -> bool:
         pass
 
+    @abstractmethod
+    async def set_status(
+        self, user_id: int, status: str,
+        suspension_reason: Optional[str] = None, suspended_at: Optional[datetime] = None
+    ) -> Optional[User]:
+        pass
+
     # Tokens are passed and stored as digests, never as the value emailed to the
     # user. Callers hash with users.verification.hash_token first.
 
@@ -251,6 +258,28 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         db_user.hashed_password = hashed_password
         self.db.commit()
         return True
+
+    async def set_status(
+        self, user_id: int, status: str,
+        suspension_reason: Optional[str] = None, suspended_at: Optional[datetime] = None
+    ) -> Optional[User]:
+        """Set a user's status together with the suspension fields (#48).
+
+        Both suspension fields are always written, so leaving suspended (by
+        passing None) clears them. The suspension fields are not on UserUpdate,
+        so an admin can't set them apart from the status.
+        """
+        db_user = await self.get_user_by_id(user_id)
+        if not db_user:
+            return None
+
+        db_user.status = status
+        db_user.suspension_reason = suspension_reason
+        db_user.suspended_at = suspended_at
+
+        self.db.commit()
+        self.db.refresh(db_user)
+        return db_user
 
     async def set_verified(self, user_id: int, is_verified: bool, status: str = None) -> Optional[User]:
         """Set a user's verified flag, and optionally their status.

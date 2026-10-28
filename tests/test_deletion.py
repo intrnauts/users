@@ -56,13 +56,13 @@ def user_exists(test_db, user_id):
 class TestOnUserDelete:
 
     async def test_without_a_hook_delete_works_as_before(self, user_service, create_test_user, test_db):
-        user = await create_test_user()
+        user = await create_test_user(status="inactive")
 
         assert await user_service.delete_user(user.id) is True
         assert not user_exists(test_db, user.id)
 
     async def test_hook_runs_once_with_the_session_and_user(self, user_service, create_test_user, db_session):
-        user = await create_test_user()
+        user = await create_test_user(status="inactive")
         calls = []
 
         def hook(db, deleted):
@@ -77,7 +77,7 @@ class TestOnUserDelete:
     async def test_hook_cleanup_lets_the_delete_through(
         self, user_service, create_test_user, db_session, app_table, test_db
     ):
-        user = await create_test_user()
+        user = await create_test_user(status="inactive")
         db_session.execute(text("INSERT INTO users.app_notes (user_id) VALUES (:u)"), {"u": user.id})
         db_session.commit()
 
@@ -91,7 +91,7 @@ class TestOnUserDelete:
         assert note_count(test_db, user.id) == 0
 
     async def test_async_hook_is_awaited(self, user_service, create_test_user):
-        user = await create_test_user()
+        user = await create_test_user(status="inactive")
         seen = []
 
         async def hook(db, deleted):
@@ -105,7 +105,7 @@ class TestOnUserDelete:
     async def test_failing_hook_deletes_nothing(
         self, user_service, user_repository, create_test_user, db_session, app_table, test_db
     ):
-        user = await create_test_user()
+        user = await create_test_user(status="inactive")
         # A token row, which delete_user() removes before running the hook
         await user_repository.create_email_verification_token(
             user.id, "digest", datetime.utcnow() + timedelta(hours=1)
@@ -142,7 +142,7 @@ class TestOnUserDelete:
             fresh.close()
 
     async def test_configuring_none_removes_the_hook(self, user_service, create_test_user):
-        user = await create_test_user()
+        user = await create_test_user(status="inactive")
         calls = []
         configure_user_deletion(on_user_delete=lambda db, u: calls.append(u.id))
         configure_user_deletion(None)

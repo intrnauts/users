@@ -672,6 +672,34 @@ alembic upgrade head
 It only creates the table. For a new database, `setup_users_package(create_tables=True)`
 creates it along with the others.
 
+## Cleaning Up When a User Is Deleted
+
+`delete_user()` (and so `DELETE /users/{user_id}`) removes the user and their
+tokens. Your own tables are your app's to handle. If they reference `users.id`
+with `ON DELETE CASCADE` there's nothing to do. Otherwise, or to keep some rows
+and anonymize them, register a callback at startup:
+
+```python
+from users import configure_user_deletion
+
+def on_user_delete(db, user):
+    db.query(Review).filter(Review.user_id == user.id).update({"user_id": None})
+    db.query(Favorite).filter(Favorite.user_id == user.id).delete()
+
+configure_user_deletion(on_user_delete=on_user_delete)
+```
+
+- It runs inside `delete_user()`, in the same transaction, after the user's
+  tokens are removed and before the user row is. The user row is still there,
+  so the callback can read it.
+- It gets the SQLAlchemy session and the `User`. It can be a plain function or
+  an `async def`.
+- **Don't commit in it.** If it raises, the whole delete is rolled back, its own
+  writes included, and the exception reaches the caller.
+- One callback per app. `configure_user_deletion(None)` removes it.
+
+No callback means no change: the delete works as it always has.
+
 ## Models
 
 ### User Model

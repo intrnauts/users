@@ -170,6 +170,11 @@ class UserService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Your account has been deactivated. Please contact an admin.",
             )
+        if user.status == UserStatus.SUSPENDED.value:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your account has been suspended. Please contact an admin.",
+            )
 
         if config.require_verified_email and not user.is_verified:
             raise verification_error

@@ -16,6 +16,8 @@ from .verification import generate_token, hash_token, get_verification_config
 
 logger = logging.getLogger(__name__)
 
+VERIFY_EMAIL_MESSAGE = "Please verify your email address before logging in."
+
 class UserService:
     def __init__(
         self,
@@ -137,6 +139,34 @@ class UserService:
 
         return user
 
+    async def status_refusal(self, user) -> Optional[str]:
+        """Why this account can't be let in, or None if its status allows it.
+
+        The one place these messages live: login() refuses with them as a 401,
+        and get_current_active_user() as a 403 for a token already issued (#61).
+        """
+        if user.status == UserStatus.ACTIVE.value:
+            return None
+
+        config = get_verification_config()
+        if user.status == UserStatus.PENDING.value:
+            # A user who was sent a verification link and has not used it should
+            # be told to check their email, not that they are waiting on an admin.
+            if not user.is_verified and (
+                config.require_verified_email or config.send_verification_on_register
+            ):
+                return VERIFY_EMAIL_MESSAGE
+            return "Your account is pending admin approval."
+        if user.status == UserStatus.INACTIVE.value:
+            # Read only with self-delete on, so apps without migration 0005
+            # never touch the table (#29)
+            if config.allow_self_delete and await self.user_repo.get_account_deletion(user.id):
+                return "Your account is scheduled for deletion. Use the link in the email we sent to keep or restore it."
+            return "Your account has been deactivated. Please contact an admin."
+        if user.status == UserStatus.SUSPENDED.value:
+            return "Your account has been suspended. Please contact an admin."
+        return "Your account is not active. Please contact an admin."
+
     async def login(self, login_data: UserLogin) -> Token:
         user = await self.authenticate_user(login_data)
         if not user:
@@ -148,44 +178,16 @@ class UserService:
 
         config = get_verification_config()
 
-        # A user who was sent a verification link and has not used it should be
-        # told to check their email, not that they are waiting on an admin.
-        awaiting_verification = not user.is_verified and (
-            config.require_verified_email or config.send_verification_on_register
-        )
-        verification_error = HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Please verify your email address before logging in.",
-        )
-
         # Reject non-active accounts with a clear message
-        if user.status == UserStatus.PENDING.value:
-            if awaiting_verification:
-                raise verification_error
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your account is pending admin approval.",
-            )
-        if user.status == UserStatus.INACTIVE.value:
-            # Read only with self-delete on, so apps without migration 0005
-            # never touch the table (#29)
-            if config.allow_self_delete and await self.user_repo.get_account_deletion(user.id):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Your account is scheduled for deletion. Use the link in the email we sent to keep or restore it.",
-                )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your account has been deactivated. Please contact an admin.",
-            )
-        if user.status == UserStatus.SUSPENDED.value:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your account has been suspended. Please contact an admin.",
-            )
+        refusal = await self.status_refusal(user)
+        if refusal:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=refusal)
 
         if config.require_verified_email and not user.is_verified:
-            raise verification_error
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=VERIFY_EMAIL_MESSAGE,
+            )
 
         # Only a login that issues a token counts, not a correct password on an
         # account rejected above

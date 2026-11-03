@@ -457,8 +457,11 @@ class TestRoutes:
         assert response.status_code == 200
         assert "purge_at" in response.json()
 
-        # The token stops working once the account is deactivated
-        assert client.get("/users/me", headers=headers).status_code == 400
+        # The token stops working once the account is deactivated, with the
+        # message login gives (#61)
+        me = client.get("/users/me", headers=headers)
+        assert me.status_code == 403
+        assert "scheduled for deletion" in me.json()["detail"]
 
         confirmed = client.post("/users/delete/confirm", json={"token": fake_email.confirm_token()})
         assert confirmed.status_code == 200 and "purge_at" in confirmed.json()

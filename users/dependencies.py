@@ -83,14 +83,17 @@ def _token_is_for(token_data: TokenData, user) -> bool:
     return token_data.user_id is None or token_data.user_id == user.id
 
 async def get_current_active_user(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    user_service: UserService = Depends(get_user_service)
 ) -> User:
-    """Get current active user (not suspended/inactive)"""
-    if current_user.status not in ["active"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user"
-        )
+    """Get current active user.
+
+    Refuses any other status with a 403 and the same message login gives for
+    it, e.g. a token issued before the account was suspended (#61).
+    """
+    refusal = await user_service.status_refusal(current_user)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
 
     return current_user
 
@@ -100,7 +103,7 @@ async def get_current_verified_user(
     """Get current verified user"""
     if not current_user.is_verified:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Email not verified"
         )
 

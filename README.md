@@ -957,12 +957,25 @@ head, and run `alembic upgrade head` once.
 | v0.6.0 | `0004_add_suspension_fields` | Required | `DELETE /users/{user_id}` now needs a suspended or inactive account; custom repositories need `set_status` |
 | v0.6.1 | none | | |
 | v0.7.0 | `0005_add_account_deletions` | Only if you turn self-delete on | Admin delete refuses the last active admin |
+| v0.7.1 | none | | `get_current_active_user` and `get_current_verified_user` refuse with 403, not 400, and per-status messages |
 
 Each version's details are in the changelog below.
 
 ## Changelog
 
-### v0.7.0 (Latest)
+### v0.7.1 (Latest)
+- ⚠️ **Behaviour change:** `get_current_active_user` and
+  `get_current_verified_user` now refuse with a **403** instead of a 400. A
+  valid token for an account that isn't allowed in is a refusal, not a bad
+  request
+- `get_current_active_user` now gives the same message login gives for the
+  account's status ("Your account has been suspended. Please contact an
+  admin.", "Your account is pending admin approval.", and so on) instead of
+  "Inactive user" for every one. Apps that match on 400 or "Inactive user"
+  need updating. `UserService.status_refusal(user)` returns that message, or
+  `None` for an active account (#61)
+
+### v0.7.0
 - 🗑️ **Self-service account deletion**, off by default. Turn it on with
   `VerificationConfig(allow_self_delete=True)`. `POST /users/me/delete` (with
   the current password) deactivates the account at once and emails confirm and

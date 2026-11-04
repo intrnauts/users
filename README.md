@@ -268,7 +268,11 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 ### User Management (Admin)
 - `GET /users/` - List users
 - `GET /users/{user_id}` - Get user by ID
-- `PUT /users/{user_id}` - Update user
+- `PUT /users/{user_id}` - Update user. Changing `is_superuser` or `roles`
+  needs a superuser (403 otherwise), and nobody can change their own (400).
+  Sending the value the account already has isn't a change. The only active
+  admin keeps `is_superuser` (409). `UserService.update_user()` called without
+  `actor=` is server code and skips the superuser and own-account checks
 - `DELETE /users/{user_id}` - Delete user (only a suspended or inactive one, by
   default; see [Suspending an Account](#suspending-an-account))
 - `POST /users/{user_id}/suspend` - Suspend user, with an optional `reason`, and email them

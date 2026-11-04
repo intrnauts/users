@@ -222,7 +222,16 @@ class UserService:
             return None
         return self._user_to_response(user)
 
-    async def update_user(self, user_id: int, user_data: UserUpdate) -> Optional[UserResponse]:
+    async def update_user(
+        self, user_id: int, user_data: UserUpdate, *, actor: Optional[User] = None
+    ) -> Optional[UserResponse]:
+        """Update an account.
+
+        actor is the account making the change, when it comes from a request.
+        With an actor, only a superuser may change is_superuser or roles, and
+        never on their own account. Without one the caller is server code and
+        is trusted, as with create_user(trusted=True).
+        """
         # Check if email is being updated and if it's already taken
         if user_data.email:
             existing_user = await self.user_repo.get_user_by_email(user_data.email)
@@ -244,6 +253,8 @@ class UserService:
         current = await self.user_repo.get_user_by_id(user_id)
         if not current:
             return None
+
+        await self._check_admin_fields(current, user_data, actor)
 
         new_status = user_data.status.value if user_data.status is not None else None
         if new_status is not None:
@@ -343,6 +354,48 @@ class UserService:
                 detail="Can't delete the only active admin"
             )
         return await self.user_repo.delete_user(user_id)
+
+    async def _check_admin_fields(
+        self, user: User, user_data: UserUpdate, actor: Optional[User]
+    ) -> None:
+        """Who may change is_superuser and roles, and the last active admin.
+
+        Sending a value the account already has isn't a change, so an admin
+        page that sends the whole user back still works.
+        """
+        superuser_change = (
+            user_data.is_superuser is not None
+            and user_data.is_superuser != bool(user.is_superuser)
+        )
+        roles_change = (
+            user_data.roles is not None
+            and set(user_data.roles) != {role.name for role in user.roles}
+        )
+        if not (superuser_change or roles_change):
+            return
+
+        if actor is not None:
+            if not actor.is_superuser:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only a superuser can change is_superuser or roles"
+                )
+            if actor.id == user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You can't change your own is_superuser or roles"
+                )
+
+        if (
+            superuser_change
+            and not user_data.is_superuser
+            and user.status == UserStatus.ACTIVE.value
+            and await self._is_last_admin(user)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Can't remove superuser from the only active admin"
+            )
 
     async def _refuse_removing_last_admin(self, user: User, new_status: str) -> None:
         """Refuse a status change that would leave no active superuser (#66).

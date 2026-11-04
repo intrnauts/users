@@ -10,7 +10,7 @@ from users import email_service as email_service_module
 from users import verification as verification_module
 from users.deletion import configure_user_deletion
 from users.dependencies import get_user_service
-from users.models import UserLogin, UserStatus, UserUpdate
+from users.models import UserCreate, UserLogin, UserStatus, UserUpdate
 from users.routes import create_user_router
 from users.verification import VerificationConfig, configure_verification
 
@@ -352,3 +352,103 @@ class TestRoutes:
 
         assert client.post(f"/users/{user.id}/suspend", headers=headers).status_code == 403
         assert client.post(f"/users/{user.id}/reactivate", headers=headers).status_code == 403
+
+
+# --- The last active admin and your own status (#66) ----------------------------
+
+@pytest.fixture
+def superuser(create_test_user):
+    async def _make(email="admin@example.com", username="admin", status="active"):
+        return await create_test_user(
+            email=email, username=username, status=status, is_superuser=True
+        )
+    return _make
+
+
+@pytest.mark.asyncio
+class TestLastAdmin:
+
+    @pytest.mark.parametrize("status_", [UserStatus.SUSPENDED, UserStatus.INACTIVE, UserStatus.PENDING])
+    async def test_update_refuses_to_remove_the_last_admin(self, user_service, superuser, fake_email, status_):
+        admin = await superuser()
+
+        with pytest.raises(HTTPException) as exc:
+            await user_service.update_user(admin.id, UserUpdate(status=status_, first_name="Lost"))
+
+        assert exc.value.status_code == 409
+        kept = await user_service.get_user_by_id(admin.id)
+        assert kept.status == UserStatus.ACTIVE
+        assert kept.first_name != "Lost"   # nothing in the request was applied
+        assert fake_email.suspended == []
+
+    async def test_suspend_refuses_to_remove_the_last_admin(self, user_service, superuser, fake_email):
+        admin = await superuser()
+
+        with pytest.raises(HTTPException) as exc:
+            await user_service.suspend_user(admin.id)
+
+        assert exc.value.status_code == 409
+        assert (await user_service.get_user_by_id(admin.id)).status == UserStatus.ACTIVE
+
+    async def test_allowed_while_another_admin_is_active(self, user_service, superuser, fake_email):
+        admin = await superuser()
+        await superuser(email="second@example.com", username="second")
+
+        assert (await user_service.suspend_user(admin.id)).status == UserStatus.SUSPENDED
+
+    async def test_a_suspended_admin_does_not_count(self, user_service, superuser, fake_email):
+        admin = await superuser()
+        second = await superuser(email="second@example.com", username="second")
+        await user_service.suspend_user(second.id)
+
+        with pytest.raises(HTTPException):
+            await user_service.update_user(admin.id, UserUpdate(status=UserStatus.INACTIVE))
+
+    async def test_an_admin_who_is_not_active_can_still_move(self, user_service, superuser, fake_email):
+        await superuser()
+        inactive = await superuser(email="old@example.com", username="old", status="inactive")
+
+        result = await user_service.update_user(inactive.id, UserUpdate(status=UserStatus.SUSPENDED))
+
+        assert result.status == UserStatus.SUSPENDED
+
+    async def test_other_fields_of_the_last_admin_can_change(self, user_service, superuser, fake_email):
+        admin = await superuser()
+
+        result = await user_service.update_user(
+            admin.id, UserUpdate(status=UserStatus.ACTIVE, first_name="Renamed")
+        )
+
+        assert result.first_name == "Renamed"
+
+
+@pytest.mark.asyncio
+class TestOwnStatusThroughPut:
+
+    @pytest.mark.parametrize("status_", ["suspended", "inactive", "pending"])
+    async def test_an_admin_cannot_change_their_own_status(self, client, admin_headers, user_service, fake_email, status_):
+        admin, headers = await admin_headers()
+        # A second active admin, so only the self rule can refuse it
+        await user_service.create_user(
+            UserCreate(
+                email="second@example.com", password=PASSWORD, username="second",
+                status="active", is_superuser=True,
+            ),
+            trusted=True,
+        )
+
+        response = client.put(f"/users/{admin.id}", json={"status": status_}, headers=headers)
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "You can't change your own account's status"
+        assert (await user_service.get_user_by_id(admin.id)).status == UserStatus.ACTIVE
+
+    async def test_own_other_fields_and_unchanged_status_are_fine(self, client, admin_headers, fake_email):
+        admin, headers = await admin_headers()
+
+        response = client.put(
+            f"/users/{admin.id}", json={"status": "active", "first_name": "Me"}, headers=headers
+        )
+
+        assert response.status_code == 200
+        assert response.json()["first_name"] == "Me"

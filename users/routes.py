@@ -276,6 +276,17 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Update user (admin only)"""
+            # Same rule as POST /{user_id}/suspend: an admin can't lock
+            # themselves out by changing their own status (#66)
+            if (
+                user_id == current_user.id
+                and user_data.status is not None
+                and user_data.status.value != current_user.status
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You can't change your own account's status"
+                )
             user = await user_service.update_user(user_id, user_data)
             if not user:
                 raise HTTPException(

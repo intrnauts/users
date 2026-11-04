@@ -245,9 +245,12 @@ class UserService:
         if not current:
             return None
 
+        new_status = user_data.status.value if user_data.status is not None else None
+        if new_status is not None:
+            await self._refuse_removing_last_admin(current, new_status)
+
         # Moving into or out of suspended goes through _change_status, so the
         # suspension fields and the emails follow the status (#48)
-        new_status = user_data.status.value if user_data.status is not None else None
         status_change = new_status is not None and (
             (new_status == UserStatus.SUSPENDED.value)
             != (current.status == UserStatus.SUSPENDED.value)
@@ -272,6 +275,7 @@ class UserService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="User is already suspended"
             )
+        await self._refuse_removing_last_admin(user, UserStatus.SUSPENDED.value)
 
         reason = reason.strip() if reason else None
         user = await self._change_status(user, UserStatus.SUSPENDED.value, reason or None)
@@ -339,6 +343,22 @@ class UserService:
                 detail="Can't delete the only active admin"
             )
         return await self.user_repo.delete_user(user_id)
+
+    async def _refuse_removing_last_admin(self, user: User, new_status: str) -> None:
+        """Refuse a status change that would leave no active superuser (#66).
+
+        Only an active account counts as an admin, so moving the last active
+        superuser to any other status locks every admin out.
+        """
+        if (
+            new_status != UserStatus.ACTIVE.value
+            and user.status == UserStatus.ACTIVE.value
+            and await self._is_last_admin(user)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Can't suspend or deactivate the only active admin"
+            )
 
     async def _is_last_admin(self, user: User) -> bool:
         """Whether removing this user would leave no active superuser (#29)."""

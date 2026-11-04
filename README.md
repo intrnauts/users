@@ -721,7 +721,11 @@ POST /users/{user_id}/suspend
   there is one and how to reach an admin. Email is best effort: a failed send
   doesn't undo the suspension.
 - A suspended user can't log in (401), and tokens already issued stop working.
-- An admin can't suspend their own account.
+- An admin can't suspend their own account, and can't change their own
+  `status` through `PUT /users/{user_id}` either (400).
+- The only active admin can't be suspended, deactivated or set back to
+  `pending`, through either route (409, "Can't suspend or deactivate the only
+  active admin"). Otherwise no admin could sign in.
 - `POST /users/{user_id}/reactivate` makes the account active again, clears the
   reason and time, and emails the user.
 

@@ -287,7 +287,7 @@ def create_user_router(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="You can't change your own account's status"
                 )
-            user = await user_service.update_user(user_id, user_data)
+            user = await user_service.update_user(user_id, user_data, actor=current_user)
             if not user:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,

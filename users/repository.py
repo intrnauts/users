@@ -9,6 +9,7 @@ from .models import (
     UserCreate, UserUpdate, normalize_email
 )
 from .deletion import run_on_user_delete
+from .scope import DEFAULT_SCOPE
 
 class UserRepositoryInterface(ABC):
     @abstractmethod
@@ -19,12 +20,16 @@ class UserRepositoryInterface(ABC):
     async def get_user_by_id(self, user_id: int) -> Optional[User]:
         pass
 
+    # Lookups by email and username are within one scope (#70). The service
+    # passes scope only when it isn't the default, so a custom repository
+    # written before scopes keeps working in an app that doesn't use them.
+
     @abstractmethod
-    async def get_user_by_email(self, email: str) -> Optional[User]:
+    async def get_user_by_email(self, email: str, scope: str = DEFAULT_SCOPE) -> Optional[User]:
         pass
 
     @abstractmethod
-    async def get_user_by_username(self, username: str) -> Optional[User]:
+    async def get_user_by_username(self, username: str, scope: str = DEFAULT_SCOPE) -> Optional[User]:
         pass
 
     @abstractmethod
@@ -162,6 +167,7 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
             # Normalized again here, not just in the schema, so callers that
             # build a UserCreate by hand cannot store a mixed-case address.
             email=normalize_email(user_data.email),
+            scope=getattr(user_data, "scope", DEFAULT_SCOPE),
             username=user_data.username,
             first_name=user_data.first_name,
             last_name=user_data.last_name,
@@ -186,13 +192,15 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
     async def get_user_by_id(self, user_id: int) -> Optional[User]:
         return self.db.query(User).filter(User.id == user_id).first()
 
-    async def get_user_by_email(self, email: str) -> Optional[User]:
+    async def get_user_by_email(self, email: str, scope: str = DEFAULT_SCOPE) -> Optional[User]:
         return self.db.query(User).filter(
-            User.email == normalize_email(email)
+            User.scope == scope, User.email == normalize_email(email)
         ).first()
 
-    async def get_user_by_username(self, username: str) -> Optional[User]:
-        return self.db.query(User).filter(User.username == username).first()
+    async def get_user_by_username(self, username: str, scope: str = DEFAULT_SCOPE) -> Optional[User]:
+        return self.db.query(User).filter(
+            User.scope == scope, User.username == username
+        ).first()
 
     async def update_user(self, user_id: int, user_data: UserUpdate) -> Optional[User]:
         db_user = await self.get_user_by_id(user_id)

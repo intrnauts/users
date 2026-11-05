@@ -64,14 +64,17 @@ class JWTManager:
             )
             email: str = payload.get("sub")
             user_id = payload.get("uid")
+            scope = payload.get("scope")
             permissions: List[str] = payload.get("permissions", [])
 
             if email is None:
                 return None
             if user_id is not None and (not isinstance(user_id, int) or isinstance(user_id, bool)):
                 return None
+            if scope is not None and not isinstance(scope, str):
+                return None
 
-            return TokenData(email=email, user_id=user_id, permissions=permissions)
+            return TokenData(email=email, user_id=user_id, scope=scope, permissions=permissions)
         except JWTError:
             return None
 
@@ -80,7 +83,8 @@ class JWTManager:
         user_email: str,
         permissions: List[str] = None,
         expires_delta: Optional[timedelta] = None,
-        user_id: Optional[int] = None
+        user_id: Optional[int] = None,
+        scope: Optional[str] = None
     ) -> str:
         permissions = permissions or []
         data = {
@@ -91,6 +95,9 @@ class JWTManager:
         # user's address can be registered again (#55)
         if user_id is not None:
             data["uid"] = user_id
+        # The same id and email can only name one account within a scope (#70)
+        if scope is not None:
+            data["scope"] = scope
         return self.create_access_token(data, expires_delta)
 
 class AuthManager:
@@ -110,9 +117,10 @@ class AuthManager:
         user_email: str,
         permissions: List[str] = None,
         expires_delta: Optional[timedelta] = None,
-        user_id: Optional[int] = None
+        user_id: Optional[int] = None,
+        scope: Optional[str] = None
     ) -> str:
-        return self.jwt_manager.create_user_token(user_email, permissions, expires_delta, user_id)
+        return self.jwt_manager.create_user_token(user_email, permissions, expires_delta, user_id, scope)
 
     def verify_token(self, token: str) -> Optional[TokenData]:
         return self.jwt_manager.verify_token(token)

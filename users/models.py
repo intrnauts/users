@@ -2,9 +2,10 @@ from datetime import datetime
 from typing import Optional, List, Annotated
 from enum import Enum
 from pydantic import BaseModel, EmailStr, Field, BeforeValidator
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Table
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Table, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+from .scope import DEFAULT_SCOPE, SCOPE_MAX_LENGTH
 
 # Default Base - can be overridden by configure_base()
 Base = declarative_base()
@@ -39,6 +40,10 @@ def normalize_email(email):
 NormalizedEmail = Annotated[EmailStr, BeforeValidator(normalize_email)]
 OptionalNormalizedEmail = Annotated[Optional[EmailStr], BeforeValidator(normalize_email)]
 NormalizedEmailStr = Annotated[str, BeforeValidator(normalize_email)]
+
+# A scope named in a request body (#70). None means "not given": the request's
+# scope or the default applies. See users.scope.
+OptionalScope = Annotated[Optional[str], Field(max_length=SCOPE_MAX_LENGTH)]
 
 class UserStatus(str, Enum):
     ACTIVE = "active"
@@ -94,11 +99,16 @@ role_permissions = Table(
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = {'schema': 'users'}
+    # Email and username are unique within a scope, not across them (#70)
+    __table_args__ = (
+        UniqueConstraint('scope', 'email', name='uq_users_scope_email'),
+        UniqueConstraint('scope', 'username', name='uq_users_scope_username'),
+        {'schema': 'users'},
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    username = Column(String(100), unique=True, index=True, nullable=True)
+    email = Column(String(255), index=True, nullable=False)
+    username = Column(String(100), index=True, nullable=True)
     hashed_password = Column(String(255), nullable=False)
     first_name = Column(String(100), nullable=True)
     last_name = Column(String(100), nullable=True)
@@ -115,6 +125,10 @@ class User(Base):
     # The status the account had when it was suspended, so reactivating puts it
     # back there instead of always making it active (#75)
     status_before_suspension = Column(String(20), nullable=True)
+    # The set of accounts this one belongs to (#70). "" for apps without scopes.
+    scope = Column(
+        String(SCOPE_MAX_LENGTH), nullable=False, default=DEFAULT_SCOPE, server_default=DEFAULT_SCOPE
+    )
 
     roles = relationship("Role", secondary=user_roles, back_populates="users")
 
@@ -235,6 +249,7 @@ class AccountDeletionToken(Base):
 # Pydantic schemas for API
 class UserBase(BaseModel):
     email: NormalizedEmail
+    scope: str = Field(DEFAULT_SCOPE, max_length=SCOPE_MAX_LENGTH)
     username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -257,11 +272,18 @@ class UserRegister(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     password: str = Field(..., min_length=8)
+    scope: OptionalScope = None
 
-    def to_user_create(self) -> "UserCreate":
-        """Convert to a UserCreate with privileged fields forced to defaults."""
+    def to_user_create(self, scope: Optional[str] = None) -> "UserCreate":
+        """Convert to a UserCreate with privileged fields forced to defaults.
+
+        scope overrides the body's, e.g. with the scope resolved for the request.
+        """
+        if scope is None:
+            scope = self.scope if self.scope is not None else DEFAULT_SCOPE
         return UserCreate(
             email=self.email,
+            scope=scope,
             username=self.username,
             first_name=self.first_name,
             last_name=self.last_name,
@@ -313,6 +335,7 @@ class UserSuspend(BaseModel):
 class UserLogin(BaseModel):
     email: NormalizedEmailStr
     password: str
+    scope: OptionalScope = None
 
 class Token(BaseModel):
     access_token: str
@@ -324,6 +347,9 @@ class TokenData(BaseModel):
     # The id of the user the token was issued to (#55). None for tokens issued
     # before it was added.
     user_id: Optional[int] = None
+    # The scope of that user (#70). None for tokens issued before it was
+    # added, which count as the default scope.
+    scope: Optional[str] = None
     permissions: List[str] = []
 
 class RoleBase(BaseModel):
@@ -359,6 +385,7 @@ class PermissionResponse(PermissionBase):
 # Password reset schemas
 class PasswordResetRequest(BaseModel):
     email: NormalizedEmail
+    scope: OptionalScope = None
 
 class PasswordResetConfirm(BaseModel):
     token: str
@@ -374,6 +401,7 @@ class EmailVerificationConfirm(BaseModel):
 
 class EmailVerificationResend(BaseModel):
     email: NormalizedEmail
+    scope: OptionalScope = None
 
 # Email change schemas (#41)
 class EmailChangeRequest(BaseModel):

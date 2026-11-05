@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query, Body
 from .models import (
     UserCreate, UserUpdate, UserSelfUpdate, UserRegister, UserResponse, UserLogin, Token,
     RoleCreate, RoleResponse, PermissionCreate, PermissionResponse,
@@ -9,6 +9,7 @@ from .models import (
     AccountDeletionRequest, AccountDeletionTokenAction
 )
 from .service import UserService, RoleService, PermissionService
+from .scope import resolve_scope
 from .dependencies import (
     get_current_user, get_current_active_user, get_current_superuser,
     get_user_service, require_permission, require_role
@@ -30,18 +31,22 @@ def create_user_router(
         @router.post("/register", response_model=UserResponse)
         async def register(
             user_data: UserRegister,
+            request: Request,
             user_service: UserService = Depends(get_user_service)
         ):
             """Register a new user and send them a verification email"""
-            return await user_service.create_user(user_data.to_user_create())
+            scope = await resolve_scope(request, user_data.scope)
+            return await user_service.create_user(user_data.to_user_create(scope=scope))
 
         @router.post("/login", response_model=Token)
         async def login(
             login_data: UserLogin,
+            request: Request,
             user_service: UserService = Depends(get_user_service)
         ):
             """Login and get access token"""
-            return await user_service.login(login_data)
+            scope = await resolve_scope(request, login_data.scope)
+            return await user_service.login(login_data.model_copy(update={"scope": scope}))
 
         @router.get("/me", response_model=UserResponse)
         async def get_current_user_info(
@@ -201,11 +206,13 @@ def create_user_router(
         @router.post("/verify-email/resend")
         async def resend_verification_email(
             request_data: EmailVerificationResend,
+            request: Request,
             user_service: UserService = Depends(get_user_service)
         ):
             """Request a fresh verification email"""
+            scope = await resolve_scope(request, request_data.scope)
             await user_service.resend_verification_email(
-                request_data,
+                request_data.model_copy(update={"scope": scope}),
                 verification_url_template=verification_url_template
             )
             # Always return success to prevent email enumeration
@@ -214,11 +221,13 @@ def create_user_router(
         @router.post("/password-reset/request")
         async def request_password_reset(
             request_data: PasswordResetRequest,
+            request: Request,
             user_service: UserService = Depends(get_user_service)
         ):
             """Request a password reset (sends email with reset token)"""
+            scope = await resolve_scope(request, request_data.scope)
             await user_service.request_password_reset(
-                request_data,
+                request_data.model_copy(update={"scope": scope}),
                 reset_url_template=password_reset_url_template
             )
             # Always return success to prevent email enumeration

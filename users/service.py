@@ -13,6 +13,7 @@ from .repository import UserRepositoryInterface, RoleRepository, PermissionRepos
 from .auth import get_auth_manager
 from .email_service import get_email_service
 from .verification import generate_token, hash_token, get_verification_config
+from .scope import DEFAULT_SCOPE, scope_of
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,8 @@ class UserService:
                 "roles": []
             })
 
-        # Check if user already exists
-        existing_user = await self.user_repo.get_user_by_email(user_data.email)
+        # Email and username need only be unique within the scope (#70)
+        existing_user = await self._find_by_email(user_data.email, user_data.scope)
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -61,7 +62,7 @@ class UserService:
             )
 
         if user_data.username:
-            existing_username = await self.user_repo.get_user_by_username(user_data.username)
+            existing_username = await self._find_by_username(user_data.username, user_data.scope)
             if existing_username:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -128,8 +129,25 @@ class UserService:
             logger.error(f"Failed to send verification email: {e}")
             return False
 
+    async def _find_by_email(self, email: str, scope: Optional[str]) -> Optional[User]:
+        """Look an account up by email within a scope (#70).
+
+        The scope is passed to the repository only when it isn't the default,
+        so a custom repository written before scopes keeps working in an app
+        that doesn't use them.
+        """
+        if not scope:
+            return await self.user_repo.get_user_by_email(email)
+        return await self.user_repo.get_user_by_email(email, scope=scope)
+
+    async def _find_by_username(self, username: str, scope: Optional[str]) -> Optional[User]:
+        """Look an account up by username within a scope. See _find_by_email."""
+        if not scope:
+            return await self.user_repo.get_user_by_username(username)
+        return await self.user_repo.get_user_by_username(username, scope=scope)
+
     async def authenticate_user(self, login_data: UserLogin) -> Optional[User]:
-        user = await self.user_repo.get_user_by_email(login_data.email)
+        user = await self._find_by_email(login_data.email, login_data.scope)
         if not user:
             return None
 
@@ -201,7 +219,8 @@ class UserService:
         access_token = auth_manager.create_access_token(
             user_email=user.email,
             permissions=permissions,
-            user_id=user.id
+            user_id=user.id,
+            scope=scope_of(user)
         )
 
         return Token(
@@ -216,8 +235,8 @@ class UserService:
             return None
         return self._user_to_response(user)
 
-    async def get_user_by_email(self, email: str) -> Optional[UserResponse]:
-        user = await self.user_repo.get_user_by_email(email)
+    async def get_user_by_email(self, email: str, scope: str = DEFAULT_SCOPE) -> Optional[UserResponse]:
+        user = await self._find_by_email(email, scope)
         if not user:
             return None
         return self._user_to_response(user)
@@ -232,27 +251,26 @@ class UserService:
         never on their own account. Without one the caller is server code and
         is trusted, as with create_user(trusted=True).
         """
-        # Check if email is being updated and if it's already taken
+        current = await self.user_repo.get_user_by_id(user_id)
+        if not current:
+            return None
+
+        # Taken means taken by another account in the same scope (#70)
         if user_data.email:
-            existing_user = await self.user_repo.get_user_by_email(user_data.email)
+            existing_user = await self._find_by_email(user_data.email, scope_of(current))
             if existing_user and existing_user.id != user_id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Email already registered"
                 )
 
-        # Check if username is being updated and if it's already taken
         if user_data.username:
-            existing_username = await self.user_repo.get_user_by_username(user_data.username)
+            existing_username = await self._find_by_username(user_data.username, scope_of(current))
             if existing_username and existing_username.id != user_id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Username already taken"
                 )
-
-        current = await self.user_repo.get_user_by_id(user_id)
-        if not current:
-            return None
 
         await self._check_admin_fields(current, user_data, actor)
 
@@ -520,7 +538,7 @@ class UserService:
         Always returns True, whether or not the address belongs to an account,
         so the endpoint cannot be used to enumerate registered emails.
         """
-        user = await self.user_repo.get_user_by_email(request_data.email)
+        user = await self._find_by_email(request_data.email, request_data.scope)
         if not user:
             return True
 
@@ -601,8 +619,8 @@ class UserService:
         Returns:
             Always returns True to prevent email enumeration
         """
-        # Look up user by email
-        user = await self.user_repo.get_user_by_email(request_data.email)
+        # Look up user by email, in the scope the request names (#70)
+        user = await self._find_by_email(request_data.email, request_data.scope)
 
         # Always return True even if user doesn't exist (prevent email enumeration)
         if not user:
@@ -757,7 +775,7 @@ class UserService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="That is already your email address"
             )
-        if await self.user_repo.get_user_by_email(new_email):
+        if await self._find_by_email(new_email, scope_of(user)):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered"
@@ -815,7 +833,7 @@ class UserService:
                 detail="Invalid or expired email change token"
             )
         # Checked again here: someone may have registered the address since.
-        if await self.user_repo.get_user_by_email(change.new_email):
+        if await self._find_by_email(change.new_email, scope_of(user)):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered"
@@ -871,7 +889,7 @@ class UserService:
         await self.user_repo.delete_user_email_change_tokens(
             user.id, purposes=self._PENDING_EMAIL_CHANGE
         )
-        await self._force_password_reset(user.id, user.email, reset_url_template)
+        await self._force_password_reset(user.id, user.email, scope_of(user), reset_url_template)
         return True
 
     async def revert_email_change(
@@ -896,7 +914,7 @@ class UserService:
             )
 
         if user.email != change.old_email:
-            holder = await self.user_repo.get_user_by_email(change.old_email)
+            holder = await self._find_by_email(change.old_email, scope_of(user))
             if holder and holder.id != user.id:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -909,7 +927,7 @@ class UserService:
         await self.user_repo.mark_email_change_token_as_used(token_hash)
         await self.user_repo.delete_user_email_change_tokens(user.id)
         await self.user_repo.delete_user_verification_tokens(user.id)
-        await self._force_password_reset(user.id, change.old_email, reset_url_template)
+        await self._force_password_reset(user.id, change.old_email, scope_of(user), reset_url_template)
         return True
 
     async def _issue_email_change_token(
@@ -954,7 +972,9 @@ class UserService:
             )
         return token_hash, change
 
-    async def _force_password_reset(self, user_id: int, email: str, reset_url_template: str = None) -> None:
+    async def _force_password_reset(
+        self, user_id: int, email: str, scope: str, reset_url_template: str = None
+    ) -> None:
         """Make the current password stop working, then send a reset link.
 
         The password is replaced with the hash of a random value nobody knows.
@@ -963,7 +983,7 @@ class UserService:
         auth_manager = get_auth_manager()
         await self.user_repo.set_password(user_id, auth_manager.hash_password(generate_token()))
         await self.request_password_reset(
-            PasswordResetRequest(email=email), reset_url_template=reset_url_template
+            PasswordResetRequest(email=email, scope=scope), reset_url_template=reset_url_template
         )
 
     def _email_change_link(self, action: str, token: str) -> str:
@@ -1160,6 +1180,7 @@ class UserService:
         return UserResponse(
             id=user.id,
             email=user.email,
+            scope=scope_of(user),
             username=user.username,
             first_name=user.first_name,
             last_name=user.last_name,

@@ -248,8 +248,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 ## API Endpoints
 
 ### Authentication
-- `POST /users/register` - Register new user
-- `POST /users/login` - Login and get access token
+- `POST /users/register` - Register new user (optional `scope`, see [Scopes](#scopes))
+- `POST /users/login` - Login and get access token (optional `scope`)
 - `GET /users/me` - Get current user info
 - `PUT /users/me` - Update current user (username and name; a request that
   includes `email` is refused with a 400)
@@ -859,6 +859,84 @@ cp migrations/0005_add_account_deletions.py <your-project>/alembic/versions/
 alembic upgrade head
 ```
 
+## Scopes
+
+A scope is a separate set of accounts in the same database, such as one per
+tenant. Every account belongs to exactly one scope. Email and username are
+unique within a scope, so the same address can hold one account in each.
+
+An app that doesn't use scopes doesn't need to do anything. Every account is in
+the default scope, `""`, and requests that don't name a scope use it.
+
+### Naming the scope
+
+The public flows take an optional `scope` in the request body: register,
+login, password reset, and resending verification.
+
+```http
+POST /users/login
+{"email": "sam@example.com", "password": "...", "scope": "acme"}
+```
+
+Login puts the account's scope in the token, next to its id. After that, every
+authenticated request is for the token's scope, so the routes behind a login
+take no scope. The links in emails carry tokens that name one account, so they
+need none either. A token for an account in one scope can't be used as an
+account in another.
+
+In server code, `UserCreate` and `UserService.get_user_by_email(email, scope)`
+take the scope too.
+
+### Telling the package the request's scope
+
+If your app knows which scope a request belongs to, for example from its
+subdomain, register a function that returns it:
+
+```python
+from users import configure_scope
+
+def request_scope(request):
+    host = request.headers.get("host", "")
+    return host.split(".")[0] if host.endswith(".example.com") else None
+
+configure_scope(request_scope=request_scope)
+```
+
+When it returns a scope, a token issued in another scope is refused (401), and
+a request body that names another scope is refused (400). When it returns
+`None`, the body's scope and the token's scope stand. The function may be
+async.
+
+Without such a function, anyone can name any scope in the body. That's fine
+for login and password reset, which still need the account's password or
+inbox. **Open registration is different:** `POST /users/register` would create
+an account in any scope the caller names. An app with scopes should register a
+request-scope function, or leave `/register` out and create accounts from its
+own route with `create_user(trusted=True)`.
+
+### Custom repositories
+
+`get_user_by_email` and `get_user_by_username` on `UserRepositoryInterface`
+take an optional `scope`. The service passes it only when it isn't the default,
+so a custom repository written before scopes keeps working in an app that
+doesn't use them. To use scopes with one, add the parameter and filter on it.
+
+### Database migration
+
+`migrations/0007_add_user_scope.py` adds the `scope` column (non-null, default
+`""`) and moves uniqueness from `email` and `username` to `(scope, email)` and
+`(scope, username)`:
+
+```bash
+cp migrations/0007_add_user_scope.py <your-project>/alembic/versions/
+# set down_revision to your current head, then
+alembic upgrade head
+```
+
+It's required: the column is on the `User` model, so every user query fails
+without it. Existing accounts land in the default scope. A downgrade aborts,
+naming the accounts, if an email or username is used in more than one scope.
+
 ## Models
 
 ### User Model
@@ -877,6 +955,8 @@ alembic upgrade head
     "last_login": "2023-01-01T00:00:00Z",
     "suspension_reason": null,
     "suspended_at": null,
+    "status_before_suspension": null,
+    "scope": "",
     "roles": ["user", "viewer"]
 }
 ```
@@ -977,10 +1057,30 @@ head, and run `alembic upgrade head` once.
 | v0.7.1 | none | | `get_current_active_user` and `get_current_verified_user` refuse with 403, not 400, and per-status messages |
 | v0.7.2 | none | | `PUT /users/{user_id}`: only a superuser changes `is_superuser` or `roles`; nobody changes their own status, `is_superuser` or `roles` |
 | v0.7.3 | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
+| v0.8.0 (unreleased) | `0007_add_user_scope` | Required: the column is on `User`, so every user query fails without it | Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
 
 Each version's details are in the changelog below.
 
 ## Changelog
+
+### Unreleased (v0.8.0)
+- 🏢 **Scopes:** every account belongs to a scope, and email and username are
+  unique within it, so the same address can hold one account per scope. Apps
+  that don't use scopes see no change: everything is in the default scope,
+  `""`. Register, login, password reset and resending verification take an
+  optional `scope` in the body. See [Scopes](#scopes) (#70)
+- Tokens carry the account's scope next to its id, and are matched to the
+  account by id. A token for one scope can't be used in another. Tokens issued
+  before the upgrade count as the default scope until they expire
+- `configure_scope(request_scope=...)` lets an app say which scope a request
+  belongs to. A token or a body naming another scope is then refused
+- `UserResponse` includes `scope`. `UserRepositoryInterface.get_user_by_email`
+  and `get_user_by_username` take an optional `scope`; custom repositories
+  without it keep working in apps that don't use scopes
+- 🐘 **Migration needed:** `migrations/0007_add_user_scope.py` adds the
+  column and moves the unique indexes on email and username to
+  `(scope, email)` and `(scope, username)`. Required, because the column is on
+  `User`
 
 ### v0.7.3 (Latest)
 - 🐛 `POST /users/{user_id}/reactivate` puts an account back to the status it

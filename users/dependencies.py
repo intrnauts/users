@@ -1,11 +1,12 @@
 from typing import Optional, List
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from .auth import get_auth_manager
 from .models import User, TokenData
 from .service import UserService
 from .repository import SQLAlchemyUserRepository
+from .scope import DEFAULT_SCOPE, get_request_scope, scope_of
 
 security = HTTPBearer()
 
@@ -57,17 +58,18 @@ async def get_current_user_token(
 
 async def get_current_user(
     token_data: TokenData = Depends(get_current_user_token),
-    user_service: UserService = Depends(get_user_service)
+    user_service: UserService = Depends(get_user_service),
+    request: Request = None
 ) -> User:
     """Get current authenticated user"""
-    user = await user_service.get_user_by_email(token_data.email)
+    user = await _user_for_token(token_data, user_service)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not _token_is_for(token_data, user):
+    if not await _token_is_for(token_data, user, request):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -76,11 +78,34 @@ async def get_current_user(
 
     return user
 
-def _token_is_for(token_data: TokenData, user) -> bool:
-    """Whether a token was issued to this account, not an earlier one with the
-    same email (#55). Tokens from before the id was added carry none and are
-    accepted until they expire."""
-    return token_data.user_id is None or token_data.user_id == user.id
+def _token_scope(token_data: TokenData) -> str:
+    """Tokens from before scopes were added count as the default scope (#70)."""
+    return token_data.scope if token_data.scope is not None else DEFAULT_SCOPE
+
+async def _user_for_token(token_data: TokenData, user_service: UserService):
+    """The account a token names: by id when it carries one (#55, #70), else
+    by email in the token's scope. Tokens from before the id was added carry
+    none and are accepted until they expire."""
+    if token_data.user_id is not None:
+        return await user_service.get_user_by_id(token_data.user_id)
+    return await user_service.get_user_by_email(token_data.email, _token_scope(token_data))
+
+async def _token_is_for(token_data: TokenData, user, request: Optional[Request] = None) -> bool:
+    """Whether a token was issued to this account.
+
+    The email must still match, as it did when tokens were looked up by email,
+    so changing the address still ends the sessions that used the old one. The
+    scope must be the account's (#70) and, if the app says which scope the
+    request belongs to, that one too.
+    """
+    if token_data.email != user.email:
+        return False
+    if token_data.user_id is not None and token_data.user_id != user.id:
+        return False
+    if _token_scope(token_data) != scope_of(user):
+        return False
+    request_scope = await get_request_scope(request)
+    return request_scope is None or request_scope == scope_of(user)
 
 async def get_current_active_user(
     current_user: User = Depends(get_current_user),
@@ -196,7 +221,8 @@ async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(
         HTTPBearer(auto_error=False)
     ),
-    user_service: UserService = Depends(get_user_service)
+    user_service: UserService = Depends(get_user_service),
+    request: Request = None
 ) -> Optional[User]:
     """Get current user if authenticated, None otherwise"""
     if credentials is None:
@@ -209,8 +235,8 @@ async def get_current_user_optional(
         if token_data is None:
             return None
 
-        user = await user_service.get_user_by_email(token_data.email)
-        if user is None or not _token_is_for(token_data, user):
+        user = await _user_for_token(token_data, user_service)
+        if user is None or not await _token_is_for(token_data, user, request):
             return None
         return user
     except Exception:

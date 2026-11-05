@@ -304,11 +304,20 @@ class SQLAlchemyUserRepository(UserRepositoryInterface):
         Both suspension fields are always written, so leaving suspended (by
         passing None) clears them. The suspension fields are not on UserUpdate,
         so an admin can't set them apart from the status.
+
+        Moving into suspended also records the status the account had, and any
+        other status clears it, so reactivating can put the account back (#75).
+        Suspending an account that is already suspended keeps what was recorded.
         """
         db_user = await self.get_user_by_id(user_id)
         if not db_user:
             return None
 
+        if status == UserStatus.SUSPENDED.value:
+            if db_user.status != UserStatus.SUSPENDED.value:
+                db_user.status_before_suspension = db_user.status
+        else:
+            db_user.status_before_suspension = None
         db_user.status = status
         db_user.suspension_reason = suspension_reason
         db_user.suspended_at = suspended_at

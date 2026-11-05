@@ -546,3 +546,87 @@ class TestSuspendingPending:
         )
 
         assert result.first_name == "Edited"
+
+
+# --- Reactivating goes back to the status before the suspension (#75) -----------
+
+@pytest.mark.asyncio
+class TestReactivateRestoresStatus:
+
+    async def test_an_active_account_comes_back_active_with_an_email(self, user_service, member, fake_email):
+        user = await member()
+        suspended = await user_service.suspend_user(user.id, "Spam")
+        assert suspended.status_before_suspension == "active"
+
+        result = await user_service.reactivate_user(user.id)
+
+        assert result.status == UserStatus.ACTIVE
+        assert result.status_before_suspension is None
+        assert fake_email.reactivated == ["member@example.com"]
+
+    async def test_an_inactive_account_comes_back_inactive_without_an_email(self, user_service, member, fake_email):
+        user = await member(status="inactive")
+        await user_service.suspend_user(user.id, "Spam")
+
+        result = await user_service.reactivate_user(user.id)
+
+        assert result.status == UserStatus.INACTIVE
+        assert result.suspension_reason is None
+        assert result.suspended_at is None
+        assert result.status_before_suspension is None
+        assert fake_email.reactivated == []
+
+    async def test_suspending_through_put_records_it_too(self, user_service, member, fake_email):
+        user = await member(status="inactive")
+        await user_service.update_user(user.id, UserUpdate(status=UserStatus.SUSPENDED))
+
+        result = await user_service.reactivate_user(user.id)
+
+        assert result.status == UserStatus.INACTIVE
+
+    async def test_suspending_again_keeps_what_was_recorded(self, user_service, member, fake_email):
+        user = await member(status="inactive")
+        await user_service.suspend_user(user.id, "Spam")
+        await user_service.update_user(user.id, UserUpdate(status=UserStatus.SUSPENDED, first_name="Edited"))
+
+        assert (await user_service.reactivate_user(user.id)).status == UserStatus.INACTIVE
+
+    async def test_an_explicit_status_through_put_wins_and_clears_it(self, user_service, member, fake_email):
+        user = await member(status="inactive")
+        await user_service.suspend_user(user.id, "Spam")
+
+        result = await user_service.update_user(user.id, UserUpdate(status=UserStatus.ACTIVE))
+
+        assert result.status == UserStatus.ACTIVE
+        assert result.status_before_suspension is None
+        assert fake_email.reactivated == ["member@example.com"]
+
+    async def test_nothing_recorded_falls_back_to_active(self, user_service, user_repository, member, fake_email):
+        """An account suspended before migration 0006 has nothing recorded."""
+        user = await member(status="inactive")
+        await user_service.suspend_user(user.id, "Spam")
+        row = await user_repository.get_user_by_id(user.id)
+        row.status_before_suspension = None
+        user_repository.db.commit()
+
+        assert (await user_service.reactivate_user(user.id)).status == UserStatus.ACTIVE
+
+    async def test_a_bad_recorded_value_falls_back_to_active(self, user_service, user_repository, member, fake_email):
+        user = await member()
+        await user_service.suspend_user(user.id, "Spam")
+        row = await user_repository.get_user_by_id(user.id)
+        row.status_before_suspension = "suspended"
+        user_repository.db.commit()
+
+        assert (await user_service.reactivate_user(user.id)).status == UserStatus.ACTIVE
+
+    async def test_through_the_route(self, client, admin_headers, member, user_service, fake_email):
+        _, headers = await admin_headers()
+        user = await member(status="inactive")
+        client.post(f"/users/{user.id}/suspend", json={"reason": "Spam"}, headers=headers)
+
+        response = client.post(f"/users/{user.id}/reactivate", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "inactive"
+        assert response.json()["status_before_suspension"] is None

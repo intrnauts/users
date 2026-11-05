@@ -112,6 +112,9 @@ class User(Base):
     # Set while status is suspended (#48), cleared when the account leaves it
     suspension_reason = Column(Text, nullable=True)
     suspended_at = Column(DateTime, nullable=True)
+    # The status the account had when it was suspended, so reactivating puts it
+    # back there instead of always making it active (#75)
+    status_before_suspension = Column(String(20), nullable=True)
 
     roles = relationship("Role", secondary=user_roles, back_populates="users")
 
@@ -296,6 +299,7 @@ class UserResponse(UserBase):
     last_login: Optional[datetime] = None
     suspension_reason: Optional[str] = None
     suspended_at: Optional[datetime] = None
+    status_before_suspension: Optional[str] = None
     roles: List[str] = []
 
     class Config:

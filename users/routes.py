@@ -352,7 +352,7 @@ def create_user_router(
             current_user = Depends(require_permission("users:write")),
             user_service: UserService = Depends(get_user_service)
         ):
-            """Make a suspended user active again and email them (admin only)"""
+            """Lift a suspension, putting the user back to the status they had (admin only)"""
             user = await user_service.reactivate_user(user_id)
             if not user:
                 raise HTTPException(

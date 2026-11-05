@@ -251,6 +251,18 @@ class TestKeepConfirmRestore:
         assert exc_info.value.status_code == 400
         assert "expired" in exc_info.value.detail
 
+    async def test_reactivating_keeps_the_grace_period(self, user_service, user_repository, member, fake_email):
+        """An admin suspension lifted during the grace period goes back to
+        inactive, with the deletion still scheduled (#75)."""
+        user = await member()
+        await user_service.request_account_deletion(user.id, request())
+        await user_service.suspend_user(user.id, "Spam")
+
+        result = await user_service.reactivate_user(user.id)
+
+        assert result.status == UserStatus.INACTIVE
+        assert await user_repository.get_account_deletion(user.id) is not None
+
     async def test_restoring_leaves_an_admin_suspension_alone(self, user_service, member, fake_email):
         user = await member()
         await user_service.request_account_deletion(user.id, request())

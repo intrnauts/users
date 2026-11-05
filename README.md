@@ -277,7 +277,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
   default; see [Suspending an Account](#suspending-an-account))
 - `POST /users/{user_id}/suspend` - Suspend user, with an optional `reason`, and email them
 - `POST /users/{user_id}/reactivate` - Make a suspended user active again, and email them
-- `POST /users/{user_id}/verify` - Verify user
+- `POST /users/{user_id}/verify` - Mark a user verified (and active, if pending)
 - `GET /users/{user_id}/permissions` - Get user permissions
 
 ### Role Management
@@ -574,7 +574,9 @@ VerificationConfig(auto_activate_on_verify=False)
 ```
 
 `POST /users/{user_id}/verify` remains available as an admin override that marks
-a user verified and active without a token.
+a user verified without a token. A `pending` account is made active too. A
+suspended or inactive account keeps its status and its suspension details:
+lifting a suspension stays with `/reactivate` or `PUT`.
 
 ### Database migration
 

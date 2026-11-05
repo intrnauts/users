@@ -449,15 +449,23 @@ class UserService:
         return await self.user_repo.set_password(user_id, new_hashed_password)
 
     async def verify_user(self, user_id: int) -> Optional[UserResponse]:
-        """Mark a user verified and active without a token (admin action)."""
+        """Mark a user verified without a token (admin action).
+
+        A pending account is made active too, as before. Any other status is
+        left alone: verifying isn't a way to lift a suspension or bring back an
+        inactive account (#67). That stays with /reactivate and PUT.
+        """
         user = await self.user_repo.get_user_by_id(user_id)
         if not user:
             return None
 
+        new_status = (
+            UserStatus.ACTIVE.value if user.status == UserStatus.PENDING.value else None
+        )
         # Must go through set_verified: UserUpdate has no is_verified field, so
         # update_user() would silently drop it.
         updated_user = await self.user_repo.set_verified(
-            user_id, is_verified=True, status=UserStatus.ACTIVE.value
+            user_id, is_verified=True, status=new_status
         )
         return self._user_to_response(updated_user)
 

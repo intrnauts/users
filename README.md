@@ -266,7 +266,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 - `POST /users/password-reset/confirm` - Confirm password reset with token
 
 ### User Management (Admin)
-- `GET /users/` - List users
+- `GET /users/` - List users (`status_filter`; `scope_filter` when scopes are on, see [Scopes](#admin-routes))
 - `GET /users/{user_id}` - Get user by ID
 - `PUT /users/{user_id}` - Update user. Changing `is_superuser` or `roles`
   needs a superuser (403 otherwise), and nobody can change their own (400).
@@ -929,6 +929,25 @@ an account in any scope the caller names. An app with scopes should register a
 request-scope function, or leave `/register` out and create accounts from its
 own route with `create_user(trusted=True)`.
 
+### Admin routes
+
+With scopes on, an admin who isn't a superuser only acts on accounts in their
+own scope. This covers every admin route: list, get, `PUT`, verify, suspend,
+reactivate, delete and permissions. An account in another scope gets the same
+404 as one that doesn't exist, so its id gives nothing away.
+
+- `GET /users/` lists only the caller's scope. `scope_filter` naming another
+  scope gets 403.
+- A superuser acts across scopes. `GET /users/` lists every scope, or one with
+  `?scope_filter=<scope>` (`?scope_filter=` for the default scope).
+- `is_superuser` is global, and only a superuser changes it or roles (#72).
+- The boundary is on the routes. Server code calling `UserService` directly is
+  trusted, as before, so an app building its own member endpoints applies its
+  own checks.
+
+With scopes off, admins act on every account as before, and `scope_filter`
+naming any scope but `""` gets 400.
+
 ### Custom repositories
 
 `get_user_by_email` and `get_user_by_username` on `UserRepositoryInterface`
@@ -1091,6 +1110,10 @@ Each version's details are in the changelog below.
 - Tokens carry the account's scope next to its id, and are matched to the
   account by id. A token for one scope can't be used in another. Tokens issued
   before the upgrade count as the default scope until they expire
+- With scopes on, the admin routes only act on accounts in the caller's own
+  scope unless the caller is a superuser. Another scope's account gets 404.
+  `GET /users/` takes `scope_filter`; only a superuser can name another scope
+  with it
 - `configure_scope(enabled=True, request_scope=...)` also lets an app say
   which scope a request belongs to. A token or a body naming another scope is then refused
 - `UserResponse` includes `scope`. `UserRepositoryInterface.get_user_by_email`

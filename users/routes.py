@@ -9,11 +9,28 @@ from .models import (
     AccountDeletionRequest, AccountDeletionTokenAction
 )
 from .service import UserService, RoleService, PermissionService
-from .scope import resolve_scope
+from .scope import check_scope_allowed, resolve_scope, scope_of, scopes_enabled
 from .dependencies import (
     get_current_user, get_current_active_user, get_current_superuser,
     get_user_service, require_permission, require_role
 )
+
+async def _require_in_scope(user_id: int, current_user, user_service: UserService) -> None:
+    """The scope boundary on admin routes (#70).
+
+    With scopes on, an admin who isn't a superuser only acts on accounts in
+    their own scope. An account in another scope gets the same 404 as one that
+    doesn't exist, so its id gives nothing away. Superusers act across scopes,
+    and with scopes off there is only one.
+    """
+    if not scopes_enabled() or current_user.is_superuser:
+        return
+    target = await user_service.get_user_by_id(user_id)
+    if target is None or scope_of(target) != scope_of(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
 
 def create_user_router(
     prefix: str = "/users",
@@ -249,13 +266,29 @@ def create_user_router(
             limit: int = Query(100, ge=1, le=1000),
             status_filter: Optional[str] = Query(None),
             role_filter: Optional[str] = Query(None),
+            scope_filter: Optional[str] = Query(None, max_length=100),
             current_user = Depends(require_permission("users:read")),
             user_service: UserService = Depends(get_user_service)
         ):
-            """List users (admin only)"""
+            """List users (admin only)
+
+            With scopes on, a superuser sees every scope, or one with
+            scope_filter. Any other admin sees only their own scope (#70).
+            """
+            check_scope_allowed(scope_filter)
             filters = {}
             if status_filter:
                 filters["status"] = status_filter
+            if scopes_enabled():
+                if not current_user.is_superuser:
+                    if scope_filter is not None and scope_filter != scope_of(current_user):
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only list accounts in your own scope"
+                        )
+                    filters["scope"] = scope_of(current_user)
+                elif scope_filter is not None:
+                    filters["scope"] = scope_filter
             if role_filter:
                 # This would need additional logic to filter by role
                 pass
@@ -269,6 +302,7 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Get user by ID (admin only)"""
+            await _require_in_scope(user_id, current_user, user_service)
             user = await user_service.get_user_by_id(user_id)
             if not user:
                 raise HTTPException(
@@ -285,6 +319,7 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Update user (admin only)"""
+            await _require_in_scope(user_id, current_user, user_service)
             # Same rule as POST /{user_id}/suspend: an admin can't lock
             # themselves out by changing their own status (#66)
             if (
@@ -311,6 +346,7 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Delete user (admin only)"""
+            await _require_in_scope(user_id, current_user, user_service)
             success = await user_service.delete_user(user_id)
             if not success:
                 raise HTTPException(
@@ -326,6 +362,7 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Verify user (admin only)"""
+            await _require_in_scope(user_id, current_user, user_service)
             user = await user_service.verify_user(user_id)
             if not user:
                 raise HTTPException(
@@ -342,6 +379,7 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Suspend a user, with an optional reason, and email them (admin only)"""
+            await _require_in_scope(user_id, current_user, user_service)
             if user_id == current_user.id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -362,6 +400,7 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Lift a suspension, putting the user back to the status they had (admin only)"""
+            await _require_in_scope(user_id, current_user, user_service)
             user = await user_service.reactivate_user(user_id)
             if not user:
                 raise HTTPException(
@@ -377,6 +416,7 @@ def create_user_router(
             user_service: UserService = Depends(get_user_service)
         ):
             """Get user permissions (admin only)"""
+            await _require_in_scope(user_id, current_user, user_service)
             permissions = await user_service.get_user_permissions(user_id)
             return {"permissions": permissions}
 

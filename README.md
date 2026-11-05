@@ -1122,13 +1122,13 @@ head, and run `alembic upgrade head` once.
 | v0.7.1 | none | | `get_current_active_user` and `get_current_verified_user` refuse with 403, not 400, and per-status messages |
 | v0.7.2 | none | | `PUT /users/{user_id}`: only a superuser changes `is_superuser` or `roles`; nobody changes their own status, `is_superuser` or `roles` |
 | v0.7.3 | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
-| v0.8.0 (unreleased) | `0007_add_user_scope` | Required, even with scopes off: the column is on `User`, so every user query fails without it | Scopes stay off until `configure_scope()`. Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
+| v0.8.0 | `0007_add_user_scope` | Required, even with scopes off: the column is on `User`, so every user query fails without it | Scopes stay off until `configure_scope()`. Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
 
 Each version's details are in the changelog below.
 
 ## Changelog
 
-### Unreleased (v0.8.0)
+### v0.8.0 (Latest)
 - 🏢 **Scopes, off by default:** every account belongs to a scope, and email
   and username are unique within it, so the same address can hold one account
   per scope. An app turns them on with `configure_scope()`. Until it does,
@@ -1156,7 +1156,7 @@ Each version's details are in the changelog below.
   `(scope, email)` and `(scope, username)`. Required, because the column is on
   `User`
 
-### v0.7.3 (Latest)
+### v0.7.3
 - 🐛 `POST /users/{user_id}/reactivate` puts an account back to the status it
   had when it was suspended, instead of always making it active. Suspending an
   inactive account and reactivating it used to bring it back. The status is

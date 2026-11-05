@@ -13,7 +13,7 @@ from .repository import UserRepositoryInterface, RoleRepository, PermissionRepos
 from .auth import get_auth_manager
 from .email_service import get_email_service
 from .verification import generate_token, hash_token, get_verification_config
-from .scope import DEFAULT_SCOPE, check_scope_allowed, scope_of
+from .scope import DEFAULT_SCOPE, check_scope_allowed, scope_of, scoped_template
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,10 @@ class UserService:
             verification_url_template = config.verification_url_template
 
         try:
+            # Resolved first, so a template that can't be built issues no token
+            verification_url_template = await scoped_template(
+                verification_url_template, scope_of(user)
+            )
             raw_token = generate_token()
             expires_at = datetime.utcnow() + timedelta(
                 hours=config.verification_token_ttl_hours
@@ -654,7 +658,7 @@ class UserService:
             await email_service.send_password_reset_email(
                 recipient_email=user.email,
                 reset_token=reset_token,
-                reset_url_template=reset_url_template
+                reset_url_template=await scoped_template(reset_url_template, scope_of(user))
             )
         except Exception as e:
             # Log error but don't expose it to prevent information leakage
@@ -798,13 +802,13 @@ class UserService:
             email_service = get_email_service()
             await email_service.send_email_change_confirmation(
                 recipient_email=new_email,
-                confirm_link=self._email_change_link("confirm", confirm_token),
+                confirm_link=await self._email_change_link("confirm", confirm_token, scope_of(user)),
                 ttl_hours=config.verification_token_ttl_hours
             )
             await email_service.send_email_change_requested_notice(
                 recipient_email=user.email,
                 new_email=new_email,
-                cancel_link=self._email_change_link("cancel", cancel_token)
+                cancel_link=await self._email_change_link("cancel", cancel_token, scope_of(user))
             )
         except Exception as e:
             logger.error(f"Failed to send email change emails: {e}")
@@ -862,7 +866,7 @@ class UserService:
             await email_service.send_email_change_completed_notice(
                 recipient_email=change.old_email,
                 new_email=change.new_email,
-                revert_link=self._email_change_link("revert", revert_token),
+                revert_link=await self._email_change_link("revert", revert_token, scope_of(user)),
                 ttl_days=config.email_change_revert_ttl_days
             )
         except Exception as e:
@@ -988,8 +992,8 @@ class UserService:
             PasswordResetRequest(email=email, scope=scope), reset_url_template=reset_url_template
         )
 
-    def _email_change_link(self, action: str, token: str) -> str:
-        template = get_verification_config().email_change_url_template
+    async def _email_change_link(self, action: str, token: str, scope: str) -> str:
+        template = await scoped_template(get_verification_config().email_change_url_template, scope)
         if template is None:
             return token
         return template.format(action=action, token=token)
@@ -1048,8 +1052,8 @@ class UserService:
             email_service = get_email_service()
             await email_service.send_account_deletion_requested(
                 recipient_email=user.email,
-                confirm_link=self._account_deletion_link("confirm", confirm_token),
-                keep_link=self._account_deletion_link("keep", keep_token),
+                confirm_link=await self._account_deletion_link("confirm", confirm_token, scope_of(user)),
+                keep_link=await self._account_deletion_link("keep", keep_token, scope_of(user)),
                 purge_at=purge_at
             )
         except Exception as e:
@@ -1077,7 +1081,7 @@ class UserService:
             email_service = get_email_service()
             await email_service.send_account_deletion_confirmed(
                 recipient_email=user.email,
-                restore_link=self._account_deletion_link("restore", restore_token),
+                restore_link=await self._account_deletion_link("restore", restore_token, scope_of(user)),
                 purge_at=purge_at
             )
         except Exception as e:
@@ -1171,8 +1175,8 @@ class UserService:
             )
         return await self.user_repo.get_account_deletion_by_id(found.deletion_id)
 
-    def _account_deletion_link(self, action: str, token: str) -> str:
-        template = get_verification_config().account_deletion_url_template
+    async def _account_deletion_link(self, action: str, token: str, scope: str) -> str:
+        template = await scoped_template(get_verification_config().account_deletion_url_template, scope)
         if template is None:
             return token
         return template.format(action=action, token=token)

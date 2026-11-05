@@ -929,6 +929,35 @@ an account in any scope the caller names. An app with scopes should register a
 request-scope function, or leave `/register` out and create accounts from its
 own route with `create_user(trusted=True)`.
 
+### Email links per scope
+
+If each scope has its own address, such as a subdomain per tenant, register a
+function that returns the base URL for a scope, and write the URL templates as
+paths starting with `/`:
+
+```python
+configure_scope(
+    enabled=True,
+    base_url=lambda scope: f"https://{scope}.example.com" if scope else "https://example.com",
+)
+configure_verification(VerificationConfig(
+    verification_url_template="/verify-email?token={token}",
+    email_change_url_template="/account/email/{action}?token={token}",
+    account_deletion_url_template="/account/delete/{action}?token={token}",
+))
+app.include_router(create_user_router(password_reset_url_template="/reset?token={token}"))
+```
+
+A template starting with `/` gets the base URL of the account's scope in front:
+password reset, verification, email change and account deletion. Absolute
+templates are used as they are, so nothing changes until you write a path. The
+function may be async. Because it maps a scope to an address, scope values can
+be stable ids rather than tenant names.
+
+A path template with no base URL for the scope is a misconfiguration: that
+email isn't sent, and the error is logged, as with any failed send. The request
+itself still succeeds.
+
 ### Admin routes
 
 With scopes on, an admin who isn't a superuser only acts on accounts in their
@@ -1114,6 +1143,9 @@ Each version's details are in the changelog below.
   scope unless the caller is a superuser. Another scope's account gets 404.
   `GET /users/` takes `scope_filter`; only a superuser can name another scope
   with it
+- `configure_scope(base_url=...)` gives each scope its own base URL for email
+  links. A URL template that starts with `/` gets the base URL of the
+  account's scope in front; absolute templates work as before
 - `configure_scope(enabled=True, request_scope=...)` also lets an app say
   which scope a request belongs to. A token or a body naming another scope is then refused
 - `UserResponse` includes `scope`. `UserRepositoryInterface.get_user_by_email`

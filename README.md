@@ -735,8 +735,12 @@ POST /users/{user_id}/suspend
 - A `pending` account can't be suspended, through either route (409).
   Reactivating makes an account active, so it would skip approval and email
   verification. Deactivate or delete a pending account instead.
-- `POST /users/{user_id}/reactivate` makes the account active again, clears the
-  reason and time, and emails the user.
+- `POST /users/{user_id}/reactivate` lifts the suspension and clears the reason
+  and time. The account goes back to the status it had when it was suspended
+  (returned on the user as `status_before_suspension`), so an inactive account
+  stays inactive, including one in its self-delete grace period. Only a move
+  back to `active` emails the user. Accounts suspended before migration 0006
+  have nothing recorded and become active, as before.
 
 Setting `status` through `PUT /users/{user_id}` does the same: moving to
 `suspended` suspends with no reason, and moving from `suspended` clears the
@@ -971,10 +975,23 @@ head, and run `alembic upgrade head` once.
 | v0.6.1 | none | | |
 | v0.7.0 | `0005_add_account_deletions` | Only if you turn self-delete on | Admin delete refuses the last active admin |
 | v0.7.1 | none | | `get_current_active_user` and `get_current_verified_user` refuse with 403, not 400, and per-status messages |
+| v0.7.2 | none | | `PUT /users/{user_id}`: only a superuser changes `is_superuser` or `roles`; nobody changes their own status, `is_superuser` or `roles` |
+| Unreleased | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
 
 Each version's details are in the changelog below.
 
 ## Changelog
+
+### Unreleased
+- 🐛 `POST /users/{user_id}/reactivate` puts an account back to the status it
+  had when it was suspended, instead of always making it active. Suspending an
+  inactive account and reactivating it used to bring it back. The status is
+  returned on the user as `status_before_suspension`, and only a move to
+  `active` sends the reactivation email (#75)
+- 🐘 **Migration needed:** `migrations/0006_add_status_before_suspension.py`
+  adds one nullable column to `users.users`. It's required: the column is on
+  the `User` model. Custom repositories need nothing new; one that doesn't
+  record the status gets today's behaviour
 
 ### v0.7.2 (Latest)
 - ⚠️ **Behaviour change:** changing `is_superuser` or `roles` through

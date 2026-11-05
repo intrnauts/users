@@ -296,7 +296,14 @@ class UserService:
         return self._user_to_response(user)
 
     async def reactivate_user(self, user_id: int) -> Optional[UserResponse]:
-        """Make a suspended account active again and email the user (#48)."""
+        """Lift a suspension (#48).
+
+        The account goes back to the status it had when it was suspended (#75):
+        an inactive account, including one in its self-delete grace period,
+        stays inactive. Accounts suspended before that was recorded, or by a
+        custom repository that doesn't record it, become active as before. Only
+        a move to active emails the user.
+        """
         user = await self.user_repo.get_user_by_id(user_id)
         if not user:
             return None
@@ -306,7 +313,13 @@ class UserService:
                 detail="User is not suspended"
             )
 
-        user = await self._change_status(user, UserStatus.ACTIVE.value)
+        previous = getattr(user, "status_before_suspension", None)
+        restore_to = (
+            previous
+            if previous in {s.value for s in UserStatus} and previous != UserStatus.SUSPENDED.value
+            else UserStatus.ACTIVE.value
+        )
+        user = await self._change_status(user, restore_to)
         return self._user_to_response(user)
 
     async def _change_status(self, user: User, new_status: str, reason: Optional[str] = None) -> User:
@@ -1158,6 +1171,7 @@ class UserService:
             last_login=user.last_login,
             suspension_reason=user.suspension_reason,
             suspended_at=user.suspended_at,
+            status_before_suspension=getattr(user, "status_before_suspension", None),
             roles=role_names
         )
 

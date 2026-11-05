@@ -996,7 +996,9 @@ cp migrations/0007_add_user_scope.py <your-project>/alembic/versions/
 alembic upgrade head
 ```
 
-It's required even if you leave scopes off: the column is on the `User` model,
+It finds the existing uniqueness on `email` and `username` by column, so it
+works whether your schema came from the package's `create_all` or from your own
+SQL (use the file from 0.8.1 or later). It's required even if you leave scopes off: the column is on the `User` model,
 so every user query fails without it. Existing accounts land in the default
 scope, and with scopes off every account stays there, so email and username
 stay unique as before. A downgrade aborts,
@@ -1122,13 +1124,26 @@ head, and run `alembic upgrade head` once.
 | v0.7.1 | none | | `get_current_active_user` and `get_current_verified_user` refuse with 403, not 400, and per-status messages |
 | v0.7.2 | none | | `PUT /users/{user_id}`: only a superuser changes `is_superuser` or `roles`; nobody changes their own status, `is_superuser` or `roles` |
 | v0.7.3 | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
-| v0.8.0 | `0007_add_user_scope` | Required, even with scopes off: the column is on `User`, so every user query fails without it | Scopes stay off until `configure_scope()`. Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
+| v0.8.0 | `0007_add_user_scope` (use the 0.8.1 file) | Required, even with scopes off: the column is on `User`, so every user query fails without it | Scopes stay off until `configure_scope()`. Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
+| v0.8.1 | none new; a fixed `0007_add_user_scope` | Replace a 0007 copied from 0.8.0 | 0007 works whatever the existing unique index or constraint on `email` / `username` is called |
 
 Each version's details are in the changelog below.
 
 ## Changelog
 
-### v0.8.0 (Latest)
+### v0.8.1 (Latest)
+- 🐛 `migrations/0007_add_user_scope.py` failed on a `users` schema not built
+  by the package's `create_all`, e.g. one created from raw SQL with
+  `email ... UNIQUE` (a constraint named `users_email_key`, and no
+  `ix_users_users_email` index): "index ix_users_users_email does not exist".
+  It now finds the existing uniqueness on `email` and `username` by column,
+  whatever it's called, so it works on both. The revision id is unchanged: the
+  old file can't have succeeded on such a database, and on a `create_all`
+  schema the result is the same. **If you copied 0007 from 0.8.0, replace it
+  with this one** before running it (#83)
+- No code changes
+
+### v0.8.0
 - 🏢 **Scopes, off by default:** every account belongs to a scope, and email
   and username are unique within it, so the same address can hold one account
   per scope. An app turns them on with `configure_scope()`. Until it does,

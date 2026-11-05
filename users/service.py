@@ -13,7 +13,7 @@ from .repository import UserRepositoryInterface, RoleRepository, PermissionRepos
 from .auth import get_auth_manager
 from .email_service import get_email_service
 from .verification import generate_token, hash_token, get_verification_config
-from .scope import DEFAULT_SCOPE, scope_of
+from .scope import DEFAULT_SCOPE, check_scope_allowed, scope_of
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,9 @@ class UserService:
                 "roles": []
             })
 
-        # Email and username need only be unique within the scope (#70)
+        # Email and username need only be unique within the scope (#70). With
+        # scopes off there is only the default one, as before scopes existed.
+        check_scope_allowed(user_data.scope)
         existing_user = await self._find_by_email(user_data.email, user_data.scope)
         if existing_user:
             raise HTTPException(

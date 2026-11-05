@@ -1,6 +1,9 @@
 """Scopes (#70): the same email can hold one account in each scope, and a token
 only reaches the account, and the scope, it was issued for."""
 
+import subprocess
+import sys
+
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -46,7 +49,9 @@ class RecordingEmailService:
 
 @pytest.fixture(autouse=True)
 def isolate_globals(monkeypatch):
+    """Scopes on, with no request-scope function, unless a test says otherwise."""
     monkeypatch.setattr(verification_module, "_verification_config", None)
+    monkeypatch.setattr(scope_module, "_enabled", True)
     monkeypatch.setattr(scope_module, "_request_scope", None)
 
 
@@ -267,7 +272,7 @@ class TestRequestScope:
     async def test_the_request_scope_is_used_when_the_body_has_none(
         self, client, create_test_user, auth_config
     ):
-        configure_scope(request_scope=self.by_header)
+        configure_scope(enabled=True, request_scope=self.by_header)
         tenant = await account(create_test_user, scope="t1")
 
         response = client.post(
@@ -278,7 +283,7 @@ class TestRequestScope:
         assert claims(response.json()["access_token"], auth_config)["uid"] == tenant.id
 
     async def test_a_body_scope_that_differs_is_refused(self, client, create_test_user):
-        configure_scope(request_scope=self.by_header)
+        configure_scope(enabled=True, request_scope=self.by_header)
         await account(create_test_user, scope="t1")
 
         response = client.post(
@@ -291,7 +296,7 @@ class TestRequestScope:
     async def test_a_token_is_rejected_in_another_scopes_request(
         self, client, user_service, create_test_user
     ):
-        configure_scope(request_scope=self.by_header)
+        configure_scope(enabled=True, request_scope=self.by_header)
         await account(create_test_user, scope="t1")
         token = await login(user_service, scope="t1")
 
@@ -301,7 +306,7 @@ class TestRequestScope:
     async def test_no_request_scope_means_the_tokens_scope_stands(
         self, client, user_service, create_test_user
     ):
-        configure_scope(request_scope=self.by_header)
+        configure_scope(enabled=True, request_scope=self.by_header)
         await account(create_test_user, scope="t1")
         token = await login(user_service, scope="t1")
 
@@ -310,7 +315,7 @@ class TestRequestScope:
     async def test_the_function_may_be_a_coroutine(self, client, create_test_user):
         async def request_scope(request):
             return "t1"
-        configure_scope(request_scope=request_scope)
+        configure_scope(enabled=True, request_scope=request_scope)
         await account(create_test_user, scope="t1")
 
         assert client.post(
@@ -369,6 +374,71 @@ class TestPublicFlows:
                 user.id, EmailChangeRequest(current_password=PASSWORD, new_email="mine@example.com")
             )
         assert error.value.detail == "Email already registered"
+
+
+@pytest.mark.asyncio
+class TestScopesOff:
+    """An app that doesn't turn scopes on behaves as before they existed."""
+
+    @pytest.fixture(autouse=True)
+    def scopes_off(self):
+        configure_scope(enabled=False)
+
+    async def test_off_is_the_default(self):
+        # A fresh interpreter, since this module's fixtures set the flag
+        result = subprocess.run(
+            [sys.executable, "-c", "import users; print(users.scopes_enabled())"],
+            capture_output=True, text=True, check=True
+        )
+        assert result.stdout.strip() == "False"
+
+    @pytest.mark.parametrize("path,body", [
+        ("/users/register", {"email": EMAIL, "password": PASSWORD, "scope": "t1"}),
+        ("/users/login", {"email": EMAIL, "password": PASSWORD, "scope": "t1"}),
+        ("/users/password-reset/request", {"email": EMAIL, "scope": "t1"}),
+        ("/users/verify-email/resend", {"email": EMAIL, "scope": "t1"}),
+    ])
+    async def test_a_body_naming_a_scope_is_refused(self, client, emails, path, body):
+        response = client.post(path, json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Scopes are not enabled"
+
+    async def test_nobody_can_create_a_second_account_for_an_address(self, client, create_test_user, emails):
+        await account(create_test_user)
+
+        assert client.post("/users/register", json={
+            "email": EMAIL, "password": PASSWORD, "scope": "t1"
+        }).status_code == 400
+        assert client.post("/users/register", json={
+            "email": EMAIL, "password": PASSWORD
+        }).json()["detail"] == "Email already registered"
+
+    async def test_server_code_cant_create_an_account_in_a_scope(self, user_service):
+        with pytest.raises(HTTPException) as error:
+            await user_service.create_user(
+                UserCreate(email=EMAIL, password=PASSWORD, scope="t1"), trusted=True
+            )
+        assert error.value.status_code == 400
+
+    async def test_the_default_scope_named_explicitly_is_fine(self, client, create_test_user):
+        await account(create_test_user)
+
+        assert client.post("/users/login", json={
+            "email": EMAIL, "password": PASSWORD, "scope": ""
+        }).status_code == 200
+
+    async def test_everything_works_as_before(self, client, create_test_user, auth_config):
+        user = await account(create_test_user)
+
+        response = client.post("/users/login", json={"email": EMAIL, "password": PASSWORD})
+        token = response.json()["access_token"]
+        assert claims(token, auth_config)["scope"] == ""
+        me = client.get("/users/me", headers=bearer(token))
+        assert (me.json()["id"], me.json()["scope"]) == (user.id, "")
+
+    async def test_a_request_scope_function_needs_scopes_on(self):
+        with pytest.raises(ValueError):
+            configure_scope(enabled=False, request_scope=lambda request: "t1")
 
 
 class PreScopeRepository(SQLAlchemyUserRepository):

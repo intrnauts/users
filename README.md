@@ -248,8 +248,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES="30"
 ## API Endpoints
 
 ### Authentication
-- `POST /users/register` - Register new user (optional `scope`, see [Scopes](#scopes))
-- `POST /users/login` - Login and get access token (optional `scope`)
+- `POST /users/register` - Register new user (optional `scope` when scopes are on, see [Scopes](#scopes))
+- `POST /users/login` - Login and get access token (optional `scope` when scopes are on)
 - `GET /users/me` - Get current user info
 - `PUT /users/me` - Update current user (username and name; a request that
   includes `email` is refused with a 400)
@@ -865,8 +865,23 @@ A scope is a separate set of accounts in the same database, such as one per
 tenant. Every account belongs to exactly one scope. Email and username are
 unique within a scope, so the same address can hold one account in each.
 
-An app that doesn't use scopes doesn't need to do anything. Every account is in
-the default scope, `""`, and requests that don't name a scope use it.
+### Turning scopes on
+
+Scopes are **off by default**, and stay off after upgrading until your app turns
+them on:
+
+```python
+from users import configure_scope
+
+configure_scope()  # or configure_scope(enabled=True, request_scope=...)
+```
+
+Off, the package behaves as it did before scopes. Every account is in the
+default scope, `""`. A request body or a `UserCreate` naming any other scope is
+refused with 400, "Scopes are not enabled", so nobody can create a second
+account for an address. Naming `""` is allowed. Migration 0007 is still needed
+to upgrade (see below), but it changes nothing for an app that leaves scopes
+off.
 
 ### Naming the scope
 
@@ -890,7 +905,7 @@ take the scope too.
 ### Telling the package the request's scope
 
 If your app knows which scope a request belongs to, for example from its
-subdomain, register a function that returns it:
+subdomain, register a function that returns it when you turn scopes on:
 
 ```python
 from users import configure_scope
@@ -899,7 +914,7 @@ def request_scope(request):
     host = request.headers.get("host", "")
     return host.split(".")[0] if host.endswith(".example.com") else None
 
-configure_scope(request_scope=request_scope)
+configure_scope(enabled=True, request_scope=request_scope)
 ```
 
 When it returns a scope, a token issued in another scope is refused (401), and
@@ -907,7 +922,7 @@ a request body that names another scope is refused (400). When it returns
 `None`, the body's scope and the token's scope stand. The function may be
 async.
 
-Without such a function, anyone can name any scope in the body. That's fine
+With scopes on and no such function, anyone can name any scope in the body. That's fine
 for login and password reset, which still need the account's password or
 inbox. **Open registration is different:** `POST /users/register` would create
 an account in any scope the caller names. An app with scopes should register a
@@ -933,8 +948,10 @@ cp migrations/0007_add_user_scope.py <your-project>/alembic/versions/
 alembic upgrade head
 ```
 
-It's required: the column is on the `User` model, so every user query fails
-without it. Existing accounts land in the default scope. A downgrade aborts,
+It's required even if you leave scopes off: the column is on the `User` model,
+so every user query fails without it. Existing accounts land in the default
+scope, and with scopes off every account stays there, so email and username
+stay unique as before. A downgrade aborts,
 naming the accounts, if an email or username is used in more than one scope.
 
 ## Models
@@ -1057,28 +1074,30 @@ head, and run `alembic upgrade head` once.
 | v0.7.1 | none | | `get_current_active_user` and `get_current_verified_user` refuse with 403, not 400, and per-status messages |
 | v0.7.2 | none | | `PUT /users/{user_id}`: only a superuser changes `is_superuser` or `roles`; nobody changes their own status, `is_superuser` or `roles` |
 | v0.7.3 | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
-| v0.8.0 (unreleased) | `0007_add_user_scope` | Required: the column is on `User`, so every user query fails without it | Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
+| v0.8.0 (unreleased) | `0007_add_user_scope` | Required, even with scopes off: the column is on `User`, so every user query fails without it | Scopes stay off until `configure_scope()`. Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
 
 Each version's details are in the changelog below.
 
 ## Changelog
 
 ### Unreleased (v0.8.0)
-- 🏢 **Scopes:** every account belongs to a scope, and email and username are
-  unique within it, so the same address can hold one account per scope. Apps
-  that don't use scopes see no change: everything is in the default scope,
-  `""`. Register, login, password reset and resending verification take an
-  optional `scope` in the body. See [Scopes](#scopes) (#70)
+- 🏢 **Scopes, off by default:** every account belongs to a scope, and email
+  and username are unique within it, so the same address can hold one account
+  per scope. An app turns them on with `configure_scope()`. Until it does,
+  nothing changes: every account is in the default scope, `""`, and a body
+  naming another scope is refused (400). With scopes on, register, login,
+  password reset and resending verification take an optional `scope` in the
+  body. See [Scopes](#scopes) (#70)
 - Tokens carry the account's scope next to its id, and are matched to the
   account by id. A token for one scope can't be used in another. Tokens issued
   before the upgrade count as the default scope until they expire
-- `configure_scope(request_scope=...)` lets an app say which scope a request
-  belongs to. A token or a body naming another scope is then refused
+- `configure_scope(enabled=True, request_scope=...)` also lets an app say
+  which scope a request belongs to. A token or a body naming another scope is then refused
 - `UserResponse` includes `scope`. `UserRepositoryInterface.get_user_by_email`
   and `get_user_by_username` take an optional `scope`; custom repositories
   without it keep working in apps that don't use scopes
-- 🐘 **Migration needed:** `migrations/0007_add_user_scope.py` adds the
-  column and moves the unique indexes on email and username to
+- 🐘 **Migration needed, even with scopes off:** `migrations/0007_add_user_scope.py`
+  adds the column and moves the unique indexes on email and username to
   `(scope, email)` and `(scope, username)`. Required, because the column is on
   `User`
 

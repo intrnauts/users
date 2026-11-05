@@ -63,7 +63,7 @@ from .verification import (
 )
 
 # Scopes: separate sets of accounts in one database (#70)
-from .scope import DEFAULT_SCOPE, configure_scope, get_request_scope, resolve_scope
+from .scope import DEFAULT_SCOPE, configure_scope, scopes_enabled, get_request_scope, resolve_scope
 
 # Application cleanup when a user is deleted
 from .deletion import configure_user_deletion, get_on_user_delete, purge_due_deletions
@@ -298,7 +298,7 @@ __all__ = [
     "generate_token", "hash_token",
 
     # Scopes
-    "DEFAULT_SCOPE", "configure_scope", "get_request_scope", "resolve_scope",
+    "DEFAULT_SCOPE", "configure_scope", "scopes_enabled", "get_request_scope", "resolve_scope",
 
     # Application cleanup when a user is deleted
     "configure_user_deletion", "get_on_user_delete", "purge_due_deletions",

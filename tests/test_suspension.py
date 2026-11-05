@@ -452,3 +452,48 @@ class TestOwnStatusThroughPut:
 
         assert response.status_code == 200
         assert response.json()["first_name"] == "Me"
+
+
+# --- Admin verify leaves a suspended or inactive account alone (#67) ------------
+
+@pytest.mark.asyncio
+class TestVerifyKeepsStatus:
+
+    async def test_a_pending_account_is_made_active(self, user_service, member, fake_email):
+        user = await member(status="pending")
+
+        result = await user_service.verify_user(user.id)
+
+        assert result.is_verified is True
+        assert result.status == UserStatus.ACTIVE
+
+    async def test_a_suspended_account_stays_suspended(self, user_service, member, fake_email):
+        user = await member()
+        await user_service.suspend_user(user.id, "Spam")
+
+        result = await user_service.verify_user(user.id)
+
+        assert result.is_verified is True
+        assert result.status == UserStatus.SUSPENDED
+        assert result.suspension_reason == "Spam"
+        assert result.suspended_at is not None
+        assert fake_email.reactivated == []
+
+    async def test_an_inactive_account_stays_inactive(self, user_service, member, fake_email):
+        user = await member(status="inactive")
+
+        result = await user_service.verify_user(user.id)
+
+        assert result.is_verified is True
+        assert result.status == UserStatus.INACTIVE
+
+    async def test_through_the_route(self, client, admin_headers, member, user_service, fake_email):
+        _, headers = await admin_headers()
+        user = await member()
+        await user_service.suspend_user(user.id, "Spam")
+
+        response = client.post(f"/users/{user.id}/verify", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "suspended"
+        assert response.json()["suspension_reason"] == "Spam"

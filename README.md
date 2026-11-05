@@ -732,6 +732,9 @@ POST /users/{user_id}/suspend
 - The only active admin can't be suspended, deactivated or set back to
   `pending`, through either route (409, "Can't suspend or deactivate the only
   active admin"). Otherwise no admin could sign in.
+- A `pending` account can't be suspended, through either route (409).
+  Reactivating makes an account active, so it would skip approval and email
+  verification. Deactivate or delete a pending account instead.
 - `POST /users/{user_id}/reactivate` makes the account active again, clears the
   reason and time, and emails the user.
 
@@ -973,7 +976,27 @@ Each version's details are in the changelog below.
 
 ## Changelog
 
-### v0.7.1 (Latest)
+### v0.7.2 (Latest)
+- ⚠️ **Behaviour change:** changing `is_superuser` or `roles` through
+  `PUT /users/{user_id}` now needs a superuser (403 otherwise), and nobody can
+  change their own (400). Sending the value the account already has isn't a
+  change, so admin pages that send the whole user back keep working. The only
+  active admin keeps `is_superuser` (409). `UserService.update_user()` takes an
+  optional `actor`; called without one, from server code, it behaves as before
+  apart from the last-admin rule (#72)
+- 🐛 `PUT /users/{user_id}` refuses a change to your own `status` (400), as
+  `/suspend` already did, and neither route can suspend, deactivate or set
+  back to `pending` the only active admin (409). Before, an admin could lock
+  every admin out through `PUT` (#66)
+- 🐛 `POST /users/{user_id}/verify` makes an account active only if it was
+  `pending`. It used to lift a suspension with no email and leave
+  `suspended_at` set, and to bring back inactive accounts (#67)
+- 🐛 A `pending` account can't be suspended, through `/suspend` or `PUT`
+  (409). Suspending it and reactivating it made it active without approval or
+  a verified address. Deactivate or delete a pending account instead (#68)
+- No schema change, so no migration
+
+### v0.7.1
 - ⚠️ **Behaviour change:** `get_current_active_user` and
   `get_current_verified_user` now refuse with a **403** instead of a 400. A
   valid token for an account that isn't allowed in is a refusal, not a bad

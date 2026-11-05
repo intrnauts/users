@@ -497,3 +497,52 @@ class TestVerifyKeepsStatus:
         assert response.status_code == 200
         assert response.json()["status"] == "suspended"
         assert response.json()["suspension_reason"] == "Spam"
+# --- A pending account can't be suspended (#68) ---------------------------------
+
+@pytest.mark.asyncio
+class TestSuspendingPending:
+
+    async def test_suspend_refuses_a_pending_account(self, user_service, member, fake_email):
+        user = await member(status="pending")
+
+        with pytest.raises(HTTPException) as exc:
+            await user_service.suspend_user(user.id, "Spam")
+
+        assert exc.value.status_code == 409
+        kept = await user_service.get_user_by_id(user.id)
+        assert kept.status == UserStatus.PENDING
+        assert kept.suspended_at is None
+        assert fake_email.suspended == []
+
+    async def test_put_refuses_suspending_a_pending_account(self, user_service, member, fake_email):
+        user = await member(status="pending")
+
+        with pytest.raises(HTTPException) as exc:
+            await user_service.update_user(user.id, UserUpdate(status=UserStatus.SUSPENDED))
+
+        assert exc.value.status_code == 409
+        assert (await user_service.get_user_by_id(user.id)).status == UserStatus.PENDING
+
+    async def test_suspend_then_reactivate_cannot_skip_approval(self, client, admin_headers, member, user_service, fake_email):
+        _, headers = await admin_headers()
+        user = await member(status="pending")
+
+        assert client.post(f"/users/{user.id}/suspend", headers=headers).status_code == 409
+        assert client.post(f"/users/{user.id}/reactivate", headers=headers).status_code == 409
+        assert (await user_service.get_user_by_id(user.id)).status == UserStatus.PENDING
+
+    async def test_a_pending_account_can_still_be_deactivated_and_deleted(self, user_service, member, fake_email):
+        user = await member(status="pending")
+
+        await user_service.update_user(user.id, UserUpdate(status=UserStatus.INACTIVE))
+
+        assert await user_service.delete_user(user.id) is True
+
+    async def test_other_fields_of_a_pending_account_can_change(self, user_service, member, fake_email):
+        user = await member(status="pending")
+
+        result = await user_service.update_user(
+            user.id, UserUpdate(status=UserStatus.PENDING, first_name="Edited")
+        )
+
+        assert result.first_name == "Edited"

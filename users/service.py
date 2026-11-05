@@ -257,6 +257,8 @@ class UserService:
         await self._check_admin_fields(current, user_data, actor)
 
         new_status = user_data.status.value if user_data.status is not None else None
+        if new_status == UserStatus.SUSPENDED.value:
+            self._refuse_suspending_pending(current)
         if new_status is not None:
             await self._refuse_removing_last_admin(current, new_status)
 
@@ -286,6 +288,7 @@ class UserService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="User is already suspended"
             )
+        self._refuse_suspending_pending(user)
         await self._refuse_removing_last_admin(user, UserStatus.SUSPENDED.value)
 
         reason = reason.strip() if reason else None
@@ -395,6 +398,20 @@ class UserService:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Can't remove superuser from the only active admin"
+            )
+
+    @staticmethod
+    def _refuse_suspending_pending(user: User) -> None:
+        """A pending account can't be suspended (#68).
+
+        Reactivating always makes an account active, so suspending a pending
+        one and reactivating it would skip approval and email verification.
+        Deactivate or delete a pending account instead.
+        """
+        if user.status == UserStatus.PENDING.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A pending account can't be suspended. Deactivate or delete it instead"
             )
 
     async def _refuse_removing_last_admin(self, user: User, new_status: str) -> None:

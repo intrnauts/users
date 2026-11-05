@@ -976,24 +976,25 @@ head, and run `alembic upgrade head` once.
 | v0.7.0 | `0005_add_account_deletions` | Only if you turn self-delete on | Admin delete refuses the last active admin |
 | v0.7.1 | none | | `get_current_active_user` and `get_current_verified_user` refuse with 403, not 400, and per-status messages |
 | v0.7.2 | none | | `PUT /users/{user_id}`: only a superuser changes `is_superuser` or `roles`; nobody changes their own status, `is_superuser` or `roles` |
-| Unreleased | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
+| v0.7.3 | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
 
 Each version's details are in the changelog below.
 
 ## Changelog
 
-### Unreleased
+### v0.7.3 (Latest)
 - 🐛 `POST /users/{user_id}/reactivate` puts an account back to the status it
   had when it was suspended, instead of always making it active. Suspending an
   inactive account and reactivating it used to bring it back. The status is
   returned on the user as `status_before_suspension`, and only a move to
   `active` sends the reactivation email (#75)
-- 🐘 **Migration needed:** `migrations/0006_add_status_before_suspension.py`
-  adds one nullable column to `users.users`. It's required: the column is on
-  the `User` model. Custom repositories need nothing new; one that doesn't
+- 🐘 **Migration needed, even though this is a patch release:**
+  `migrations/0006_add_status_before_suspension.py` adds one nullable column
+  to `users.users`. Run it before deploying 0.7.3: the column is on the `User`
+  model, so every user query fails without it. Custom repositories need nothing new; one that doesn't
   record the status gets today's behaviour
 
-### v0.7.2 (Latest)
+### v0.7.2
 - ⚠️ **Behaviour change:** changing `is_superuser` or `roles` through
   `PUT /users/{user_id}` now needs a superuser (403 otherwise), and nobody can
   change their own (400). Sending the value the account already has isn't a

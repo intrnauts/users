@@ -136,6 +136,9 @@ class FakeEmailService:
     async def send_verification_email(self, recipient_email, verification_token, verification_url_template=None):
         return True
 
+    async def send_account_suspended_notice(self, recipient_email, reason=None, contact=None):
+        return True
+
 
 @pytest.fixture
 def fake_email(monkeypatch):
@@ -327,6 +330,21 @@ class TestCancelEmailChange:
         assert _purposes(db_session) == []
         with pytest.raises(HTTPException):
             await user_service.confirm_email_change(_action(confirm))
+
+
+    async def test_suspended_account_gets_no_reset_link(self, user_service, user_repository, account, fake_email, enabled):
+        """Only an admin acts on a suspended account (#86): the password still
+        stops working, but no reset link goes out until it is reactivated."""
+        user = await account()
+        await user_service.request_email_change(user.id, _request())
+        cancel = fake_email.requested[0][2]
+        await user_service.suspend_user(user.id)
+
+        assert await user_service.cancel_email_change(_action(cancel)) is True
+
+        stored = await user_repository.get_user_by_id(user.id)
+        assert not _password_works(stored)
+        assert fake_email.resets == []
 
 
 @pytest.mark.asyncio

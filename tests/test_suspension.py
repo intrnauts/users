@@ -10,9 +10,12 @@ from users import email_service as email_service_module
 from users import verification as verification_module
 from users.deletion import configure_user_deletion
 from users.dependencies import get_user_service
-from users.models import UserCreate, UserLogin, UserStatus, UserUpdate
+from users.auth import get_auth_manager
+from users.models import (
+    PasswordResetConfirm, PasswordResetRequest, UserCreate, UserLogin, UserStatus, UserUpdate,
+)
 from users.routes import create_user_router
-from users.verification import VerificationConfig, configure_verification
+from users.verification import VerificationConfig, configure_verification, hash_token
 
 PASSWORD = "test_password_123"
 
@@ -24,6 +27,7 @@ class FakeEmailService:
         self.fail = fail
         self.suspended = []     # (to, reason, contact)
         self.reactivated = []   # to
+        self.resets = []        # (to, token)
 
     async def send_account_suspended_notice(self, recipient_email, reason=None, contact=None):
         if self.fail:
@@ -38,6 +42,10 @@ class FakeEmailService:
         return True
 
     async def send_verification_email(self, recipient_email, verification_token, verification_url_template=None):
+        return True
+
+    async def send_password_reset_email(self, recipient_email, reset_token, reset_url_template=None):
+        self.resets.append((recipient_email, reset_token))
         return True
 
 
@@ -630,3 +638,90 @@ class TestReactivateRestoresStatus:
         assert response.status_code == 200
         assert response.json()["status"] == "inactive"
         assert response.json()["status_before_suspension"] is None
+
+
+SUSPENDED_MESSAGE = "Your account has been suspended. Please contact an admin."
+NEW_PASSWORD = "brand_new_password_456"
+
+
+@pytest.mark.asyncio
+class TestPasswordResetWhileSuspended:
+    """Only an admin acts on a suspended account, so reset by email stops (#86)."""
+
+    async def _reset_token(self, user_service, fake_email, email="member@example.com"):
+        await user_service.request_password_reset(PasswordResetRequest(email=email))
+        return fake_email.resets[-1][1]
+
+    async def test_request_sends_nothing_and_answers_as_usual(self, user_service, member, fake_email):
+        user = await member()
+        await user_service.suspend_user(user.id)
+
+        assert await user_service.request_password_reset(
+            PasswordResetRequest(email="member@example.com")
+        ) is True
+        assert fake_email.resets == []
+
+    async def test_request_reply_matches_an_unknown_email(self, client, user_service, member, fake_email):
+        user = await member()
+        await user_service.suspend_user(user.id)
+
+        suspended = client.post("/users/password-reset/request", json={"email": "member@example.com"})
+        unknown = client.post("/users/password-reset/request", json={"email": "nobody@example.com"})
+
+        assert (suspended.status_code, suspended.json()) == (unknown.status_code, unknown.json())
+        assert suspended.status_code == 200
+        assert fake_email.resets == []
+
+    async def test_a_token_from_before_the_suspension_is_refused_and_kept(self, user_service, user_repository, member, fake_email):
+        user = await member()
+        token = await self._reset_token(user_service, fake_email)
+        await user_service.suspend_user(user.id)
+
+        with pytest.raises(HTTPException) as exc:
+            await user_service.confirm_password_reset(
+                PasswordResetConfirm(token=token, new_password=NEW_PASSWORD)
+            )
+
+        assert exc.value.status_code == 403
+        assert exc.value.detail == SUSPENDED_MESSAGE
+        stored = await user_repository.get_user_by_id(user.id)
+        assert get_auth_manager().verify_password(PASSWORD, stored.hashed_password)
+        assert (await user_repository.get_password_reset_token(hash_token(token))).used is False
+
+    async def test_the_kept_token_works_after_reactivation(self, user_service, member, fake_email):
+        user = await member()
+        token = await self._reset_token(user_service, fake_email)
+        await user_service.suspend_user(user.id)
+        with pytest.raises(HTTPException):
+            await user_service.confirm_password_reset(
+                PasswordResetConfirm(token=token, new_password=NEW_PASSWORD)
+            )
+
+        await user_service.reactivate_user(user.id)
+
+        assert await user_service.confirm_password_reset(
+            PasswordResetConfirm(token=token, new_password=NEW_PASSWORD)
+        ) is True
+        login = await user_service.login(UserLogin(email="member@example.com", password=NEW_PASSWORD))
+        assert login.access_token
+
+    async def test_confirm_through_the_route(self, client, user_service, member, fake_email):
+        user = await member()
+        token = await self._reset_token(user_service, fake_email)
+        await user_service.suspend_user(user.id)
+
+        response = client.post(
+            "/users/password-reset/confirm", json={"token": token, "new_password": NEW_PASSWORD}
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == SUSPENDED_MESSAGE
+
+    @pytest.mark.parametrize("status_", ["pending", "inactive"])
+    async def test_other_statuses_still_reset(self, user_service, member, fake_email, status_):
+        user = await member(status=status_)
+        token = await self._reset_token(user_service, fake_email)
+
+        assert await user_service.confirm_password_reset(
+            PasswordResetConfirm(token=token, new_password=NEW_PASSWORD)
+        ) is True

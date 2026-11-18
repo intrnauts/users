@@ -632,6 +632,12 @@ class UserService:
         if not user:
             return True
 
+        # Only an admin acts on a suspended account (#86). Send nothing and
+        # answer as for an unknown email, so the reply doesn't reveal the status.
+        # Existing reset tokens are left alone; confirm refuses them while suspended.
+        if user.status == UserStatus.SUSPENDED.value:
+            return True
+
         config = get_verification_config()
 
         # Generate secure random token
@@ -709,6 +715,14 @@ class UserService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
+            )
+
+        # A token issued before a suspension must not work during it (#86). It
+        # stays unused, so it still works if the account is reactivated in time.
+        if user.status == UserStatus.SUSPENDED.value:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=await self.status_refusal(user)
             )
 
         # Hash new password

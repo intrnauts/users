@@ -139,6 +139,9 @@ class FakeEmailService:
     async def send_account_suspended_notice(self, recipient_email, reason=None, contact=None):
         return True
 
+    async def send_account_reactivated_notice(self, recipient_email):
+        return True
+
 
 @pytest.fixture
 def fake_email(monkeypatch):
@@ -332,21 +335,6 @@ class TestCancelEmailChange:
             await user_service.confirm_email_change(_action(confirm))
 
 
-    async def test_suspended_account_gets_no_reset_link(self, user_service, user_repository, account, fake_email, enabled):
-        """Only an admin acts on a suspended account (#86): the password still
-        stops working, but no reset link goes out until it is reactivated."""
-        user = await account()
-        await user_service.request_email_change(user.id, _request())
-        cancel = fake_email.requested[0][2]
-        await user_service.suspend_user(user.id)
-
-        assert await user_service.cancel_email_change(_action(cancel)) is True
-
-        stored = await user_repository.get_user_by_id(user.id)
-        assert not _password_works(stored)
-        assert fake_email.resets == []
-
-
 @pytest.mark.asyncio
 class TestRevertEmailChange:
     async def _changed(self, user_service, account, fake_email, new_email="new@example.com", user=None):
@@ -401,6 +389,86 @@ class TestRevertEmailChange:
 
 # --- Over HTTP ----------------------------------------------------------------
 
+SUSPENDED_MESSAGE = "Your account has been suspended. Please contact an admin."
+
+
+@pytest.mark.asyncio
+class TestWhileSuspended:
+    """Only an admin acts on a suspended account, so its email-change links are
+    refused, leaving the address, password and token as they were (#87)."""
+
+    async def _pending(self, user_service, account, fake_email):
+        user = await account()
+        await user_service.request_email_change(user.id, _request())
+        return user, fake_email.confirmations[-1][1], fake_email.requested[-1][2]
+
+    async def _completed(self, user_service, account, fake_email):
+        user = await account()
+        await user_service.request_email_change(user.id, _request())
+        await user_service.confirm_email_change(_action(fake_email.confirmations[-1][1]))
+        return user, fake_email.completed[-1][2]
+
+    async def _refused(self, call):
+        with pytest.raises(HTTPException) as exc:
+            await call
+        assert exc.value.status_code == 403
+        assert exc.value.detail == SUSPENDED_MESSAGE
+
+    async def _unused(self, user_repository, token):
+        return (await user_repository.get_email_change_token(hash_token(token))).used is False
+
+    async def test_confirm_is_refused(self, user_service, user_repository, account, fake_email, enabled):
+        user, confirm, _ = await self._pending(user_service, account, fake_email)
+        await user_service.suspend_user(user.id)
+
+        await self._refused(user_service.confirm_email_change(_action(confirm)))
+
+        stored = await user_repository.get_user_by_id(user.id)
+        assert stored.email == "test@example.com"
+        assert fake_email.completed == []
+        assert await self._unused(user_repository, confirm)
+
+    async def test_cancel_is_refused(self, user_service, user_repository, account, fake_email, enabled):
+        user, _, cancel = await self._pending(user_service, account, fake_email)
+        await user_service.suspend_user(user.id)
+
+        await self._refused(user_service.cancel_email_change(_action(cancel)))
+
+        stored = await user_repository.get_user_by_id(user.id)
+        assert _password_works(stored)
+        assert fake_email.resets == []
+        assert await self._unused(user_repository, cancel)
+
+    async def test_revert_is_refused(self, user_service, user_repository, account, fake_email, enabled):
+        user, revert = await self._completed(user_service, account, fake_email)
+        await user_service.suspend_user(user.id)
+
+        await self._refused(user_service.revert_email_change(_action(revert)))
+
+        stored = await user_repository.get_user_by_id(user.id)
+        assert stored.email == "new@example.com"
+        assert _password_works(stored)
+        assert fake_email.resets == []
+        assert await self._unused(user_repository, revert)
+
+    async def test_a_live_link_works_after_reactivation(self, user_service, user_repository, account, fake_email, enabled):
+        user, revert = await self._completed(user_service, account, fake_email)
+        await user_service.suspend_user(user.id)
+        await self._refused(user_service.revert_email_change(_action(revert)))
+
+        await user_service.reactivate_user(user.id)
+
+        assert await user_service.revert_email_change(_action(revert)) is True
+        assert (await user_repository.get_user_by_id(user.id)).email == "test@example.com"
+
+    @pytest.mark.parametrize("status_", ["pending", "inactive"])
+    async def test_other_statuses_are_unchanged(self, user_service, user_repository, account, fake_email, enabled, status_):
+        user, _, cancel = await self._pending(user_service, account, fake_email)
+        await user_repository.update_user(user.id, UserUpdate(status=status_))
+
+        assert await user_service.cancel_email_change(_action(cancel)) is True
+
+
 @pytest.fixture
 def client(user_service):
     app = FastAPI()
@@ -451,3 +519,18 @@ async def test_put_me_points_to_the_new_endpoint(client, user_service, account):
 
     assert response.status_code == 400
     assert "POST /me/email" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_suspended_refusal_over_http(client, user_service, account, fake_email, enabled):
+    user = await account()
+    await user_service.request_email_change(user.id, _request())
+    await user_service.suspend_user(user.id)
+
+    for path, token in (
+        ("/users/me/email/confirm", fake_email.confirmations[-1][1]),
+        ("/users/email/cancel", fake_email.requested[-1][2]),
+    ):
+        response = client.post(path, json={"token": token})
+        assert response.status_code == 403, path
+        assert response.json()["detail"] == SUSPENDED_MESSAGE

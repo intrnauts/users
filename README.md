@@ -666,6 +666,9 @@ Other safeguards:
   registered in the meantime.
 - If another account has taken the old address by the time of a revert, the
   revert is refused with 409 and the owner is told to contact an administrator.
+- A suspended account can't confirm, cancel or revert a change: only an admin
+  acts on it. Each link is refused with 403 and nothing changes. The link isn't
+  used up, so one that is still live works again after reactivation.
 
 **Limit:** access tokens already issued keep working until they expire, even
 after a cancel or revert. Keep `access_token_expire_minutes` short (#7).
@@ -731,6 +734,9 @@ POST /users/{user_id}/suspend
   nothing and gets the same reply as an unknown address, and a reset link sent
   before the suspension is refused (403) but stays valid until it expires, so
   it works again if the account is reactivated in time.
+- The same goes for email-change links: a suspended account can't confirm,
+  cancel or revert a change (403), so anything the user wants to do there has
+  to happen before the suspension.
 - An admin can't suspend their own account, and can't change their own
   `status` through `PUT /users/{user_id}` either (400).
 - The only active admin can't be suspended, deactivated or set back to
@@ -1131,12 +1137,23 @@ head, and run `alembic upgrade head` once.
 | v0.8.0 | `0007_add_user_scope` (use the 0.8.1 file) | Required, even with scopes off: the column is on `User`, so every user query fails without it | Scopes stay off until `configure_scope()`. Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
 | v0.8.1 | none new; a fixed `0007_add_user_scope` | Replace a 0007 copied from 0.8.0 | 0007 works whatever the existing unique index or constraint on `email` / `username` is called |
 | v0.8.2 | none | | A suspended account can't reset its password by email; `/password-reset/confirm` refuses it with 403 |
+| v0.8.3 | none | | A suspended account can't confirm, cancel or revert an email change; each link is refused with 403 |
 
 Each version's details are in the changelog below.
 
 ## Changelog
 
-### v0.8.2 (Latest)
+### v0.8.3 (Latest)
+- 🔒 A **suspended** account could still confirm, cancel or revert an email
+  change, since those links need no login. `POST /users/me/email/confirm`,
+  `POST /users/email/cancel` and `POST /users/email/revert` now refuse a link
+  whose account is suspended with 403 and the suspension message, before
+  anything changes: the address and password stay as they are and the link is
+  left unused, so one still live after reactivation works again. Other
+  statuses are unchanged (#87)
+- No migration
+
+### v0.8.2
 - 🔒 A **suspended** account could still set a new password by email.
   `POST /users/password-reset/request` now sends nothing for a suspended
   account and replies exactly as for an unknown address, so the reply doesn't
@@ -1146,7 +1163,7 @@ Each version's details are in the changelog below.
   inactive and scheduled-for-deletion accounts reset as before (#86)
 - Cancelling or reverting an email change on a suspended account still makes
   the old password stop working, but no reset link goes out until the account
-  is reactivated. Whether cancel and revert should be refused outright is #87
+  is reactivated. From 0.8.3 they are refused outright (#87)
 - No migration
 
 ### v0.8.1

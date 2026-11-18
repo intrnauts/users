@@ -840,12 +840,7 @@ class UserService:
             action_data.token, EmailChangeTokenPurpose.CONFIRM
         )
 
-        user = await self.user_repo.get_user_by_id(change.user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
+        user = await self._email_change_account(change)
         # A change requested from an address the account no longer has is stale.
         if user.email != change.old_email:
             raise HTTPException(
@@ -898,12 +893,7 @@ class UserService:
         token_hash, change = await self._redeem_email_change_token(
             action_data.token, EmailChangeTokenPurpose.CANCEL
         )
-        user = await self.user_repo.get_user_by_id(change.user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
+        user = await self._email_change_account(change)
 
         await self.user_repo.mark_email_change_token_as_used(token_hash)
         await self.user_repo.delete_user_email_change_tokens(
@@ -926,12 +916,7 @@ class UserService:
         token_hash, change = await self._redeem_email_change_token(
             action_data.token, EmailChangeTokenPurpose.REVERT
         )
-        user = await self.user_repo.get_user_by_id(change.user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
+        user = await self._email_change_account(change)
 
         if user.email != change.old_email:
             holder = await self._find_by_email(change.old_email, scope_of(user))
@@ -965,6 +950,26 @@ class UserService:
             expires_at=expires_at
         )
         return raw_token
+
+    async def _email_change_account(self, change):
+        """The account an email-change token belongs to, if it may act on it.
+
+        A suspended account can't confirm, cancel or revert a change (#87): only
+        an admin acts on it. Refused before anything changes, and the token stays
+        unused, so a link still live after reactivation works again.
+        """
+        user = await self.user_repo.get_user_by_id(change.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        if user.status == UserStatus.SUSPENDED.value:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=await self.status_refusal(user)
+            )
+        return user
 
     async def _redeem_email_change_token(self, token: str, purpose: EmailChangeTokenPurpose):
         """Look up a live email-change token of the given purpose.

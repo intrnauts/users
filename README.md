@@ -727,6 +727,10 @@ POST /users/{user_id}/suspend
   there is one and how to reach an admin. Email is best effort: a failed send
   doesn't undo the suspension.
 - A suspended user can't log in (401), and tokens already issued stop working.
+- A suspended user can't reset their password by email. A reset request sends
+  nothing and gets the same reply as an unknown address, and a reset link sent
+  before the suspension is refused (403) but stays valid until it expires, so
+  it works again if the account is reactivated in time.
 - An admin can't suspend their own account, and can't change their own
   `status` through `PUT /users/{user_id}` either (400).
 - The only active admin can't be suspended, deactivated or set back to
@@ -1126,12 +1130,26 @@ head, and run `alembic upgrade head` once.
 | v0.7.3 | `0006_add_status_before_suspension` | Required: the column is on `User`, so every user query fails without it | `/reactivate` returns an account to its earlier status, not always `active` |
 | v0.8.0 | `0007_add_user_scope` (use the 0.8.1 file) | Required, even with scopes off: the column is on `User`, so every user query fails without it | Scopes stay off until `configure_scope()`. Custom repositories: `get_user_by_email` / `get_user_by_username` take an optional `scope` |
 | v0.8.1 | none new; a fixed `0007_add_user_scope` | Replace a 0007 copied from 0.8.0 | 0007 works whatever the existing unique index or constraint on `email` / `username` is called |
+| v0.8.2 | none | | A suspended account can't reset its password by email; `/password-reset/confirm` refuses it with 403 |
 
 Each version's details are in the changelog below.
 
 ## Changelog
 
-### v0.8.1 (Latest)
+### v0.8.2 (Latest)
+- 🔒 A **suspended** account could still set a new password by email.
+  `POST /users/password-reset/request` now sends nothing for a suspended
+  account and replies exactly as for an unknown address, so the reply doesn't
+  reveal the status. `POST /users/password-reset/confirm` refuses a link whose
+  account is suspended with 403 and the suspension message, and leaves the
+  link unused, which covers links sent before the suspension. Pending,
+  inactive and scheduled-for-deletion accounts reset as before (#86)
+- Cancelling or reverting an email change on a suspended account still makes
+  the old password stop working, but no reset link goes out until the account
+  is reactivated. Whether cancel and revert should be refused outright is #87
+- No migration
+
+### v0.8.1
 - 🐛 `migrations/0007_add_user_scope.py` failed on a `users` schema not built
   by the package's `create_all`, e.g. one created from raw SQL with
   `email ... UNIQUE` (a constraint named `users_email_key`, and no
